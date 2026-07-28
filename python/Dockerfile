@@ -6,10 +6,21 @@
 # the egress firewall and the isolation check. Nothing personal belongs here --
 # only the Python toolchain.
 
-# A full reference rather than image+tag, so CI can pin this to the exact digest of
-# the base it just built: a run stays self-consistent even if another run publishes
-# a new base halfway through.
+# Global-scope build args, i.e. declared before any FROM, which is the only place a
+# variable may be used in a FROM line.
+#
+# BASE_REF is a full reference rather than image+tag so CI can pin it to the exact
+# digest of the base it just built: a run stays self-consistent even if another run
+# publishes a new base halfway through.
 ARG BASE_REF=ghcr.io/grst/devcontainers/base:latest
+ARG UV_VERSION=0.11.33
+
+# uv arrives as a named stage rather than `COPY --from=ghcr.io/astral-sh/uv:${VERSION}`.
+# BuildKit does not expand variables in --from at all ("variable expansion is not
+# supported for --from"), while buildah does -- so the inline form built fine under
+# podman locally and only failed in CI. A stage works under both.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uvbin
+
 FROM ${BASE_REF}
 
 ARG USERNAME=vscode
@@ -20,8 +31,7 @@ USER root
 # ---------------------------------------------------------------------------
 # uv
 # ---------------------------------------------------------------------------
-ARG UV_VERSION=0.11.33
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
+COPY --from=uvbin /uv /uvx /usr/local/bin/
 
 # UV_LINK_MODE=copy because the cache lives on a named volume while projects live
 # on the workspace bind mount: hardlinking across those two filesystems fails, and
