@@ -10,15 +10,15 @@ name: images
 # (ghcr.io/grst/devcontainer-templates/*), which would otherwise collide: a template
 # with id `python` published from this repo lands at ghcr.io/grst/devcontainers/python.
 
+# Publishing only -- no pull_request trigger. A PR build would have to hand the
+# freshly built base to the python build without a registry to put it in, and buildx's
+# docker-container driver cannot read the docker daemon's image store. test.yaml
+# already builds both images on every PR (via a throwaway localhost registry), so PR
+# coverage of the Dockerfiles is not lost by leaving it out here.
 on:
   push:
     branches: [main]
     tags: ['v*']
-    paths:
-      - base/**
-      - python/**
-      - .github/workflows/images.yaml
-  pull_request:
     paths:
       - base/**
       - python/**
@@ -53,7 +53,6 @@ jobs:
       # Pushes only from main and tags. A pull request builds to verify the
       # Dockerfiles still work but must not publish.
       - name: Log in to ghcr.io
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -71,9 +70,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            # Deterministic, full-SHA tag. type=sha above is the short form, which
-            # is nicer to read but not something the python build can compute.
-            type=raw,value=ci-${{ github.sha }}
 
       - name: Build and push base
         id: base
@@ -82,9 +78,7 @@ jobs:
           context: base
           file: base/Dockerfile
           platforms: ${{ env.PLATFORMS }}
-          push: ${{ github.event_name != 'pull_request' }}
-          # Loaded locally on a PR so the python build below can still use it.
-          load: ${{ github.event_name == 'pull_request' }}
+          push: true
           tags: ${{ steps.meta-base.outputs.tags }}
           labels: ${{ steps.meta-base.outputs.labels }}
           cache-from: type=gha,scope=base
@@ -102,32 +96,17 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
 
-      # Pin the child to the exact base built above rather than to :latest, so this
-      # run is self-consistent even if another run publishes a new base meanwhile.
-      # On push that is the immutable digest; on a pull request the base was only
-      # loaded locally, so use the deterministic ci- tag instead.
-      - name: Resolve the base reference
-        id: base-ref
-        env:
-          BASE_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/devcontainers/base
-          BASE_DIGEST: ${{ steps.base.outputs.digest }}
-        run: |
-          if [ -n "${BASE_DIGEST}" ]; then
-            echo "ref=${BASE_IMAGE}@${BASE_DIGEST}" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=${BASE_IMAGE}:ci-${{ github.sha }}" >> "$GITHUB_OUTPUT"
-          fi
-
+      # Pinned to the immutable digest of the base just pushed, not to :latest, so this
+      # run stays self-consistent even if another run publishes a new base meanwhile.
       - name: Build and push python
         uses: docker/build-push-action@v6
         with:
           context: python
           file: python/Dockerfile
           platforms: ${{ env.PLATFORMS }}
-          push: ${{ github.event_name != 'pull_request' }}
-          load: ${{ github.event_name == 'pull_request' }}
+          push: true
           build-args: |
-            BASE_REF=${{ steps.base-ref.outputs.ref }}
+            BASE_REF=${{ env.REGISTRY }}/${{ github.repository_owner }}/devcontainers/base@${{ steps.base.outputs.digest }}
           tags: ${{ steps.meta-python.outputs.tags }}
           labels: ${{ steps.meta-python.outputs.labels }}
           cache-from: type=gha,scope=python

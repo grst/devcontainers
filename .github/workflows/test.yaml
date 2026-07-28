@@ -25,26 +25,45 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+
+    # A throwaway registry to hand the base image to the python build.
+    #
+    # buildx's docker-container driver runs in its own container and cannot see the
+    # docker daemon's local image store, so a `load: true` base tagged dc-base:test is
+    # invisible to the next build -- it resolves FROM ${BASE_REF} as
+    # docker.io/library/dc-base:test and fails with "pull access denied". Pushing to a
+    # localhost registry is the supported way to chain two buildx builds. The builder
+    # needs network=host to reach it, and BuildKit allows plain HTTP for localhost.
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
     steps:
       - uses: actions/checkout@v6
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
 
       - name: Build base
         uses: docker/build-push-action@v6
         with:
           context: base
-          load: true
-          tags: dc-base:test
+          push: true
+          tags: localhost:5000/dc-base:test
           cache-from: type=gha,scope=base
           cache-to: type=gha,scope=base,mode=max
 
+      # load: true here, because the smoke steps below run it with `docker run`, which
+      # does read the daemon's image store.
       - name: Build python
         uses: docker/build-push-action@v6
         with:
           context: python
           load: true
-          build-args: BASE_REF=dc-base:test
+          build-args: BASE_REF=localhost:5000/dc-base:test
           tags: dc-python:test
           cache-from: type=gha,scope=python
           cache-to: type=gha,scope=python,mode=max
