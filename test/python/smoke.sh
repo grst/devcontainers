@@ -92,13 +92,22 @@ check 'no ~/.gitconfig shadowing the system one' bash -c '[ ! -f "$HOME/.gitconf
 echo
 echo '== isolation =='
 # Guarantee 1: nothing writable but the workspace.
-writable_binds="$(awk '$0 !~ / - (overlay|proc|sysfs|devpts|mqueue|tmpfs|devtmpfs|cgroup|cgroup2|securityfs|bpf|tracefs|debugfs|configfs|fusectl|pstore|nsfs|binfmt_misc|hugetlbfs|autofs) / && $6 ~ /^rw/ {print $5}' \
+# fuse.fuse-overlayfs alongside overlay: rootless podman uses it for the container's
+# own root filesystem when the kernel overlay driver is unavailable, and without it the
+# list below reports / as an unexpected writable mount.
+writable_binds="$(awk '$0 !~ / - (overlay|fuse\.fuse-overlayfs|proc|sysfs|devpts|mqueue|tmpfs|devtmpfs|cgroup|cgroup2|securityfs|bpf|tracefs|debugfs|configfs|fusectl|pstore|nsfs|binfmt_misc|hugetlbfs|autofs) / && $6 ~ /^rw/ {print $5}' \
     /proc/self/mountinfo | grep -Ev '^(/proc|/sys|/dev)' | sort)"
 echo "        writable non-pseudo mounts: $(echo "$writable_binds" | tr '\n' ' ')"
-if [ -n "$(echo "$writable_binds" | grep -Fx /workspace)" ]; then
+# Mounted rw *and* actually writable by this user -- the mount flag alone says nothing
+# about ownership, and a workspace owned by a uid this container cannot map surfaces
+# far downstream as a mystery `uv sync` failure instead of an isolation-check failure.
+if [ -z "$(echo "$writable_binds" | grep -Fx /workspace)" ]; then
+    bad '/workspace is not mounted read-write'
+elif touch /workspace/.write-probe 2>/dev/null; then
+    rm -f /workspace/.write-probe
     ok '/workspace is writable'
 else
-    bad '/workspace is not writable'
+    bad "/workspace is mounted rw but not writable by $(id -un) -- it is owned by uid $(stat -c %u /workspace)"
 fi
 check 'no container runtime socket' bash -c '! ls /var/run/docker.sock /run/docker.sock /run/podman/podman.sock 2>/dev/null | grep -q .'
 check 'no forwarded ssh agent' bash -c '[ -z "${SSH_AUTH_SOCK:-}" ]'
@@ -178,7 +187,9 @@ echo '== hatch =='
 # hatch is available alongside uv. What matters is that its state lands on the volume
 # rather than in the workspace or an image layer, and that it reuses the image's uv
 # instead of downloading a second private copy.
-hatch_data="$(hatch config show 2>/dev/null | sed -n 's/^data *= *"\(.*\)"$/\1/p')"
+# No `"$` anchor: hatch renders the TOML through rich, which pads every line out to
+# the terminal width, so each value carries trailing spaces.
+hatch_data="$(hatch config show 2>/dev/null | sed -n 's/^data *= *"\([^"]*\)".*$/\1/p')"
 case "$hatch_data" in
     "$HOME"/.local/share/hatch) ok "hatch data dir is on the volume (${hatch_data})" ;;
     '')                         bad 'could not read hatch data dir from `hatch config show`' ;;

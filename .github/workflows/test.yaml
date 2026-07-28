@@ -47,6 +47,13 @@ jobs:
         with:
           driver-opts: network=host
 
+      # The container user is vscode, uid 1000; the runner checks out as uid 1001. The
+      # workspace bind would be mounted rw but unwritable, so `uv sync` fails on
+      # creating .venv. On the host this is handled by podman's --userns=keep-id, which
+      # docker has no equivalent for, so hand the fixture over explicitly.
+      - name: Give the fixture to uid 1000
+        run: sudo chown -R 1000:1000 test/python
+
       - name: Build base
         uses: docker/build-push-action@v6
         with:
