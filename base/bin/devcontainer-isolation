@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# Verify the container's isolation guarantees from the inside, and refuse to come
+# up if they are broken.
+#
+# Two guarantees, and only these two:
+#
+#   1. The agent cannot modify anything on the host. /workspace is the only
+#      writable window onto host files; every other host-derived bind mount must
+#      be read-only.
+#   2. No host secret reaches the agent beyond the ones deliberately handed to it
+#      via remoteEnv. No ~/.ssh, no ~/.gnupg, no forwarded SSH agent.
+#
+# The SSH agent deserves its own note, because it is the worst of the lot and the
+# easiest to get by accident. A forwarded agent socket is a signing oracle for every
+# host that trusts the key -- nothing scopes it to git, or to GitHub. An agent in
+# this container could ssh to any of those machines and run commands there, and
+# those machines are entirely outside the container boundary. So the blast radius is
+# larger than "can write to the host", and the egress firewall does not contain it:
+# the target may well be allowlisted, and with firewall=off nothing is blocked.
+#
+# Why check from inside rather than trusting devcontainer.json: VS Code's Dev
+# Containers extension forwards the host SSH agent on its own, and that is an
+# application-scoped user setting a repository cannot turn off. A check here holds
+# however the container was started.
+#
+# Nothing in the container needs SSH: reads go over HTTPS with a read-only GH_TOKEN,
+# and writes come from `gh auth login` run inside the container.
+#
+# Runs as root (via sudo from postStartCommand) so it can read mode-0700
+# credential directories it does not own, and so it can write the state file under
+# /run. The user whose home is inspected comes from $SUDO_USER.
+#
+# A non-zero exit here fails `devcontainer up`, which is the point.
+set -uo pipefail
+
+readonly ALLOWLIST=/etc/devcontainer/mount-allowlist.txt
+readonly STATE_DIR=/run/devcontainer
+
+target_user="${SUDO_USER:-$(id -un)}"
+target_home="$(getent passwd "$target_user" | cut -d: -f6)"
+: "${target_home:=/home/${target_user}}"
+
+failures=()
+fail() { failures+=("$1"); }
+
+# ---------------------------------------------------------------------------
+# 1. Container-escape check: a container runtime socket
+# ---------------------------------------------------------------------------
+# This one matters more than everything else combined. With a runtime socket the
+# agent can start a privileged container and write anywhere on the host, which
+# defeats guarantee 1 no matter how careful the rest of the mounts are.
+for sock in /var/run/docker.sock /run/docker.sock \
+            /var/run/podman/podman.sock /run/podman/podman.sock; do
+    if [[ -S "$sock" ]]; then
+        fail "container runtime socket is mounted at ${sock} -- an agent can use it to start a privileged container and write anywhere on the host"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# 2. Secret checks
+# ---------------------------------------------------------------------------
+# SSH_AUTH_SOCK survives sudo via the env_keep in /etc/sudoers.d/devcontainer.
+# (Reading it out of /proc/1/environ instead does not work: under rootless podman the
+# container's "root" is a mapped subuid with no privilege over the container user's
+# processes, so that read fails with EPERM.)
+ssh_auth_sock="${SSH_AUTH_SOCK:-}"
+
+# Belt and braces: a forwarded agent is a mounted socket, so look for one even if the
+# variable did not reach us. These are the paths VS Code and OpenSSH use.
+if [[ -z "$ssh_auth_sock" ]]; then
+    shopt -s nullglob
+    agent_socks=(/tmp/vscode-ssh-auth*.sock /tmp/ssh-*/agent.* "${target_home}"/.ssh/*_auth_sock)
+    shopt -u nullglob
+    for candidate in "${agent_socks[@]}"; do
+        [[ -S "$candidate" ]] && ssh_auth_sock="$candidate" && break
+    done
+fi
+
+if [[ -n "$ssh_auth_sock" ]]; then
+    fail "SSH_AUTH_SOCK is set (${ssh_auth_sock}) -- a forwarded agent is a signing oracle for every host that trusts your key, so an agent in here could ssh to another machine and run commands outside the container entirely. VS Code forwards it by default; stop the host agent before launching, or use .devcontainer/up.sh"
+fi
+
+for secret_dir in "${target_home}/.ssh" "${target_home}/.gnupg" "${target_home}/.config/gh"; do
+    # Present-but-empty is fine: something created the directory, not the keys.
+    if [[ -d "$secret_dir" ]] && [[ -n "$(ls -A "$secret_dir" 2>/dev/null)" ]]; then
+        fail "${secret_dir} exists and is not empty -- host credentials must never be mounted into the container"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# 3. Mount check
+# ---------------------------------------------------------------------------
+# Everything that is a real filesystem, is not runtime plumbing, and is not in the
+# allowlist gets flagged. Allowlisted entries are additionally checked for the
+# expected rw/ro mode.
+#
+# Note we cannot tell a named volume from a host bind mount from in here -- both
+# are bind mounts of a host directory. So the allowlist enumerates the volume
+# targets too, and what we actually assert is "no unexpected writable window",
+# which is what guarantee 1 needs.
+
+# Pseudo/virtual filesystems the runtime always mounts. Anything of these types is
+# container-internal and cannot reach host files. fuse.fuse-overlayfs is here because
+# that is what rootless podman uses for the container root when the kernel's overlay
+# module is unavailable, or when storage.conf sets mount_program.
+readonly IGNORED_FSTYPES=' overlay fuse.fuse-overlayfs proc sysfs devpts mqueue tmpfs devtmpfs ramfs cgroup cgroup2 securityfs bpf tracefs debugfs configfs fusectl pstore nsfs binfmt_misc hugetlbfs efivarfs autofs rpc_pipefs squashfs '
+
+# Single-file binds the runtime manages for networking and identity. The passwd
+# and group entries are podman's, generated for --userns=keep-id; they describe
+# the container's own users and are not a window onto host files.
+readonly IGNORED_TARGETS=' /etc/hosts /etc/hostname /etc/resolv.conf /etc/passwd /etc/group /run/.containerenv /run/secrets '
+
+declare -A allow_mode=()
+if [[ -r "$ALLOWLIST" ]]; then
+    while read -r path mode _; do
+        [[ -z "$path" || "$path" == '#'* ]] && continue
+        allow_mode["${path/#\~/$target_home}"]="$mode"
+    done < "$ALLOWLIST"
+else
+    fail "${ALLOWLIST} is missing -- the base image is incomplete, cannot verify mounts"
+fi
+
+# Consumers with a legitimate extra mount declare it here, space-separated, as
+# path:mode pairs (e.g. DEVCONTAINER_EXTRA_MOUNTS="/opt/models:ro"). Kept through
+# sudo by the env_keep in /etc/sudoers.d/devcontainer.
+for extra in ${DEVCONTAINER_EXTRA_MOUNTS:-}; do
+    allow_mode["${extra%%:*}"]="${extra##*:}"
+done
+
+while read -r _id _parent _devno _root target opts rest; do
+    # fstype is the first field after the " - " separator.
+    fstype="${rest#*- }"
+    fstype="${fstype%% *}"
+
+    [[ "$IGNORED_FSTYPES" == *" ${fstype} "* ]] && continue
+    [[ "$IGNORED_TARGETS" == *" ${target} "* ]] && continue
+    # Runtime plumbing lives under these; nothing there is a host window. "/" is the
+    # container root, which is always the image itself whatever filesystem backs it,
+    # so it is skipped by target rather than by type.
+    case "$target" in
+        /|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*) continue ;;
+    esac
+
+    # mountinfo escapes space, tab, newline and backslash as octal (\040 etc),
+    # which printf %b decodes as-is.
+    target="$(printf '%b' "$target")"
+
+    mode='rw'
+    [[ ",${opts}," == *",ro,"* ]] && mode='ro'
+
+    expected="${allow_mode[$target]:-}"
+    if [[ -z "$expected" ]]; then
+        fail "unexpected ${mode} mount at ${target} (${fstype}) -- not in ${ALLOWLIST}. If it is intentional, add ${target}:${mode} to DEVCONTAINER_EXTRA_MOUNTS in devcontainer.json"
+    elif [[ "$expected" == 'ro' && "$mode" == 'rw' ]]; then
+        fail "${target} is mounted rw but must be ro -- add ',readonly' to its entry in devcontainer.json's mounts"
+    fi
+done < /proc/self/mountinfo
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+if (( ${#failures[@]} > 0 )); then
+    {
+        echo
+        echo '=============================================================='
+        echo ' devcontainer-isolation: REFUSING TO START'
+        echo '=============================================================='
+        for f in "${failures[@]}"; do
+            echo
+            echo "  * ${f}"
+        done
+        echo
+        echo '  These checks exist so an agent running in auto or bypass mode'
+        echo '  cannot write to the host or read host credentials. Fix the'
+        echo '  cause rather than removing the check.'
+        echo
+    } >&2
+    exit 1
+fi
+
+mkdir -p "$STATE_DIR"
+echo ok > "${STATE_DIR}/isolation.state"
+chmod 0644 "${STATE_DIR}/isolation.state"
+echo 'devcontainer-isolation: ok (workspace is the only writable host mount, no forwarded credentials)'

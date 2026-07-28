@@ -1,0 +1,55 @@
+# Installed as /etc/gitconfig (system scope) by base/Dockerfile.
+#
+# System rather than ~/.gitconfig on purpose: VS Code's Dev Containers extension
+# copies the host ~/.gitconfig into the container when dev.containers.copyGitConfig
+# is left at its default of true. Keeping ours at system scope means that copy
+# layers cleanly on top instead of being clobbered by it, and the settings below
+# that must not be overridden are additionally forced through GIT_CONFIG_* in
+# devcontainer.json.
+
+[user]
+	name = Gregor Sturm
+	email = mail@gregor-sturm.de
+
+# No signing config. The host sets commit.gpgSign with an SSH key under ~/.ssh,
+# and nothing from ~/.ssh is mounted into the container -- so signing here would
+# fail every commit. devcontainer.json also forces commit.gpgsign=false via
+# GIT_CONFIG_* so a copied host ~/.gitconfig cannot re-enable it.
+[commit]
+	gpgSign = false
+
+[core]
+	pager = delta
+
+[interactive]
+	diffFilter = delta --color-only
+
+[delta]
+	navigate = true
+	line-numbers = true
+	syntax-theme = Solarized (dark)
+
+[init]
+	defaultBranch = main
+
+[pull]
+	ff = only
+
+[push]
+	default = simple
+	autoSetupRemote = true
+
+[alias]
+	co = checkout
+	cm = commit
+	br = branch
+	st = status
+
+# The workspace is a bind mount owned by the host user. Under --userns=keep-id the
+# uids line up, but declaring it explicitly keeps git quiet if they ever do not.
+[safe]
+	directory = /workspace
+
+# No credential.helper: the container gets no host credentials. A read-only
+# GH_TOKEN arrives via remoteEnv for reads; run `gh auth login` in the container
+# when you actually need to push.

@@ -1,0 +1,135 @@
+# Interactive zsh configuration for the dev container.
+#
+# This is a deliberately reduced version of the host config: the parts that make
+# a shell pleasant (vi mode, fzf, big shared history, decent completion) without
+# anything that assumes Arch, X11, a desktop session, conda, or access to the
+# host's credentials. See ../../README.md for what was dropped and why.
+#
+# Installed to both /etc/skel/.zshrc and ~/.zshrc by base/Dockerfile.
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+# /commandhistory is a named volume, so history survives container rebuilds.
+# Fall back to $HOME so a bare `podman run` of the image still works.
+if [[ -d /commandhistory ]]; then
+    HISTFILE=/commandhistory/.zsh_history
+else
+    HISTFILE="${HOME}/.zsh_history"
+fi
+HISTSIZE=10000000
+SAVEHIST=10000000
+setopt hist_ignore_dups     # skip a line identical to the one before it
+setopt hist_ignore_space    # a leading space keeps a command out of history
+setopt share_history        # every shell sees the others' history immediately
+setopt inc_append_history   # write on entry rather than at shell exit
+
+# ---------------------------------------------------------------------------
+# Shell options
+# ---------------------------------------------------------------------------
+setopt extended_glob         # ^, ~, # in globs
+setopt interactive_comments  # allow trailing # comments when typing
+setopt prompt_subst          # the prompt below interpolates variables
+setopt no_flow_control       # free up ^S/^Q
+
+autoload -U zmv              # `zmv '(*).txt' '$1.md'`
+autoload -U zargs            # find -exec / xargs alternative
+
+# ---------------------------------------------------------------------------
+# Completion
+# ---------------------------------------------------------------------------
+autoload -Uz compinit
+compinit
+zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'   # case-insensitive
+zstyle ':completion:*' completer _expand _complete _ignored _approximate
+zstyle ':completion:*' menu select=2
+zstyle ':completion:*' select-prompt '%SScrolling active: current selection at %p%s'
+zstyle ':completion::complete:*' use-cache 1
+zstyle ':completion:*:descriptions' format '%U%F{cyan}%d%f%u'
+
+# ---------------------------------------------------------------------------
+# Vi mode
+# ---------------------------------------------------------------------------
+bindkey -v
+export KEYTIMEOUT=1   # no perceptible delay switching to normal mode
+
+# Show the current vi mode on the right of the prompt.
+function zle-line-init zle-keymap-select {
+    RPS1="${${KEYMAP/vicmd/-- NORMAL --}/(main|viins)/}"
+    RPS2=$RPS1
+    zle reset-prompt
+}
+zle -N zle-line-init
+zle -N zle-keymap-select
+
+# ^x^e opens the current line in $EDITOR -- useful for multi-line commands.
+autoload -U edit-command-line
+zle -N edit-command-line
+bindkey '^x^e' edit-command-line
+
+# Keys that terminfo does not reliably provide.
+bindkey "^[[3~" delete-char           # Del
+bindkey "^[[H"  beginning-of-line     # Home
+bindkey "^[[F"  end-of-line           # End
+bindkey "^[[1~" beginning-of-line     # Home (linux console / screen)
+bindkey "^[[4~" end-of-line           # End  (linux console / screen)
+bindkey "^[[7~" beginning-of-line     # Home (rxvt)
+bindkey "^[[8~" end-of-line           # End  (rxvt)
+bindkey "^[[A"  history-beginning-search-backward
+bindkey "^[[B"  history-beginning-search-forward
+bindkey "^[[1;5C" forward-word        # ctrl+right
+bindkey "^[[1;5D" backward-word       # ctrl+left
+bindkey "^H"    backward-kill-word    # ctrl+backspace
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+# EDITOR names vim while `vim` is aliased to nvim, matching the host. Tools that
+# exec "$EDITOR" therefore get real vim, interactive use gets neovim.
+export EDITOR=/usr/bin/vim
+export PAGER=less
+export LESS=-R          # keep colour from delta, bat, rg
+export BAT_THEME='Solarized (dark)'   # matches the VS Code theme
+
+# ---------------------------------------------------------------------------
+# Aliases, functions, fzf
+# ---------------------------------------------------------------------------
+# fzf is sourced last on purpose: it rebinds ^R to its own history widget, which
+# is what we want over zsh's history-incremental-search.
+for _dc_rc in aliases functions fzf; do
+    [[ -r "/etc/devcontainer/zsh/${_dc_rc}.zsh" ]] \
+        && source "/etc/devcontainer/zsh/${_dc_rc}.zsh"
+done
+unset _dc_rc
+
+# ---------------------------------------------------------------------------
+# Claude Code
+# ---------------------------------------------------------------------------
+# The container starts sessions in auto mode (post-create.sh writes
+# permissions.defaultMode into $CLAUDE_CONFIG_DIR). --allow-dangerously-skip-
+# permissions only *offers* bypassPermissions in the shift+tab cycle without
+# activating it, so a long unattended run is one keystroke away. A function
+# rather than an alias so extra flags and `claude -p '...'` still compose.
+claude() {
+    command claude --allow-dangerously-skip-permissions "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Prompt
+# ---------------------------------------------------------------------------
+# A container shell must never be mistaken for a host shell, so the prompt leads
+# with the image flavour and the egress-firewall state. The git segment is built
+# by the chpwd/precmd hooks in functions.zsh.
+_dc_prompt_marker() {
+    local flavour="${DEVCONTAINER_FLAVOUR:-devcontainer}" fw fw_colour
+    fw="$(< /run/devcontainer/firewall.state 2>/dev/null)" || fw=''
+    case "$fw" in
+        on)  fw_colour='%F{green}'  fw='fw:on' ;;
+        off) fw_colour='%F{yellow}' fw='fw:off' ;;
+        *)   fw_colour='%F{red}'    fw='fw:?' ;;
+    esac
+    print -r -- "%F{magenta}[${flavour} ${fw_colour}${fw}%F{magenta}]%f "
+}
+prompt_container="$(_dc_prompt_marker)"
+
+PROMPT='%B${prompt_container}%F{cyan}%1~${git_prompt}%F{cyan} %# %b%f%k'

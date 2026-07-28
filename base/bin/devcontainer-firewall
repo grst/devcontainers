@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+# Egress firewall for the dev container, and the gate that makes choosing one
+# mandatory.
+#
+# DEVCONTAINER_FIREWALL must be set to exactly "on" or "off". There is no default
+# anywhere in this repo: leaving it unset is a configuration error, not a request
+# for a sensible fallback, so this script exits non-zero and takes
+# `devcontainer up` down with it. The reasoning is that "did I remember to
+# restrict egress?" is not a question you want to answer by guessing after the
+# fact, particularly with an agent running unattended inside.
+#
+#   on   default-DROP egress over BOTH IPv4 and IPv6, with an allowlist resolved
+#        from /etc/devcontainer/firewall-allowlist.d/*.txt. Needs NET_ADMIN+NET_RAW.
+#   off  no restriction, with a warning.
+#
+# Runs as root via sudo from postStartCommand. DEVCONTAINER_FIREWALL survives sudo
+# thanks to the env_keep in /etc/sudoers.d/devcontainer.
+#
+# Modelled on https://github.com/anthropics/claude-code/blob/main/.devcontainer/init-firewall.sh
+# but dual-stack, which that reference is not. That difference is not cosmetic: with
+# rootless podman + pasta the container inherits the host's global IPv6 addresses, so
+# an IPv4-only ruleset leaves every dual-stack destination reachable while looking
+# completely correct under `iptables -S`. curl prefers IPv6, so in practice *all*
+# real traffic took the unfiltered path. The verification at the bottom now probes
+# each family separately so this cannot regress silently.
+set -uo pipefail
+
+readonly ALLOWLIST_DIR=/etc/devcontainer/firewall-allowlist.d
+readonly STATE_DIR=/run/devcontainer
+readonly SET4=devcontainer-allow
+readonly SET6=devcontainer-allow6
+
+die() { echo "devcontainer-firewall: $*" >&2; exit 1; }
+note() { echo "devcontainer-firewall: $*"; }
+
+# ---------------------------------------------------------------------------
+# The gate
+# ---------------------------------------------------------------------------
+case "${DEVCONTAINER_FIREWALL:-}" in
+    on|off) ;;
+    *)
+        cat >&2 <<'EOF'
+
+==============================================================
+ devcontainer-firewall: REFUSING TO START
+==============================================================
+
+  DEVCONTAINER_FIREWALL is not set to "on" or "off".
+
+  This container will not start until you choose. Set it in
+  .devcontainer/devcontainer.json:
+
+      "containerEnv": { "DEVCONTAINER_FIREWALL": "on" }
+
+    on   Restrict outbound traffic to an allowlist (Anthropic API,
+         PyPI, npm, GitHub, Ubuntu archive). Also requires:
+
+             "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"]
+
+         Extend the allowlist by dropping a .txt file into
+         /etc/devcontainer/firewall-allowlist.d/ from your Dockerfile.
+
+    off  No egress restriction. An agent that reads a malicious file
+         can reach any host on the internet, so treat everything in
+         the workspace as potentially exfiltratable.
+
+  Re-applying the devcontainer template sets this for you:
+      devcontainer templates apply -t ... -a '{"firewall":"on"}'
+
+EOF
+        exit 1
+        ;;
+esac
+
+mkdir -p "$STATE_DIR"
+write_state() { echo "$1" > "${STATE_DIR}/firewall.state"; chmod 0644 "${STATE_DIR}/firewall.state"; }
+
+if [[ "${DEVCONTAINER_FIREWALL}" == 'off' ]]; then
+    write_state off
+    note 'egress is UNRESTRICTED (DEVCONTAINER_FIREWALL=off)'
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Capability check
+# ---------------------------------------------------------------------------
+# Fail with the fix rather than with an opaque iptables permission error.
+if ! iptables -L -n >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+
+==============================================================
+ devcontainer-firewall: REFUSING TO START
+==============================================================
+
+  DEVCONTAINER_FIREWALL=on but this container cannot configure
+  iptables, so the allowlist cannot be applied. Add the required
+  capabilities to .devcontainer/devcontainer.json:
+
+      "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"]
+
+  NET_ADMIN is needed to write firewall rules; NET_RAW lets the
+  firewall send ICMP rejections instead of silently blackholing.
+
+  Then rebuild: .devcontainer/up.sh --remove-existing-container
+
+EOF
+    exit 1
+fi
+
+command -v ipset >/dev/null 2>&1 || die 'ipset is not installed; the base image is incomplete'
+
+# Is there IPv6 to worry about? If the container has a global IPv6 address we must
+# filter it; if not, we still lock the v6 chains down in case one appears later.
+have_ip6=false
+if command -v ip6tables >/dev/null 2>&1 && ip6tables -L -n >/dev/null 2>&1; then
+    have_ip6=true
+    if ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+        note 'container has global IPv6; filtering both families'
+    fi
+else
+    note 'WARNING: ip6tables unavailable; IPv6 egress cannot be filtered'
+fi
+
+# ---------------------------------------------------------------------------
+# Read the allowlist
+# ---------------------------------------------------------------------------
+# Each .txt file holds one entry per line. Blank lines and # comments are ignored.
+#   example.com          a domain; both its A and AAAA records are allowed
+#   140.82.112.0/20      an IPv4 CIDR block, used as-is
+#   2606:50c0::/32       an IPv6 CIDR block
+#   169.254.1.2          a bare address
+#   +github-meta         expand GitHub's published ranges from api.github.com/meta
+domains=()
+cidrs4=()
+cidrs6=()
+want_github_meta=false
+
+shopt -s nullglob
+allowlist_files=("${ALLOWLIST_DIR}"/*.txt)
+shopt -u nullglob
+(( ${#allowlist_files[@]} > 0 )) || die "no allowlist files in ${ALLOWLIST_DIR}"
+
+classify() { # classify <entry>: sort a literal address/CIDR into the right bucket
+    case "$1" in
+        *:*) cidrs6+=("$1") ;;
+        */*) cidrs4+=("$1") ;;
+        *)   cidrs4+=("$1/32") ;;
+    esac
+}
+
+for file in "${allowlist_files[@]}"; do
+    while read -r entry _; do
+        entry="${entry%%#*}"
+        entry="${entry//[[:space:]]/}"
+        [[ -z "$entry" ]] && continue
+        case "$entry" in
+            +github-meta) want_github_meta=true ;;
+            *[0-9a-fA-F]:*) classify "$entry" ;;
+            *)
+                if [[ "$entry" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+                    classify "$entry"
+                else
+                    domains+=("$entry")
+                fi
+                ;;
+        esac
+    done < "$file"
+done
+
+note "allowlist: ${#domains[@]} domains, $(( ${#cidrs4[@]} + ${#cidrs6[@]} )) networks, from ${#allowlist_files[@]} file(s)"
+
+# ---------------------------------------------------------------------------
+# Build the ipsets
+# ---------------------------------------------------------------------------
+# Rebuilt into temporary sets and swapped in, so a failure part-way through leaves
+# the previous (working) sets in place rather than half-populated ones.
+ipset destroy "${SET4}-new" 2>/dev/null || true
+ipset destroy "${SET6}-new" 2>/dev/null || true
+ipset create "${SET4}-new" hash:net family inet
+ipset create "${SET6}-new" hash:net family inet6
+
+add4() { ipset add "${SET4}-new" "$1" -exist 2>/dev/null || note "  could not add ${1}"; }
+add6() { ipset add "${SET6}-new" "$1" -exist 2>/dev/null || note "  could not add ${1}"; }
+
+for cidr in ${cidrs4[@]+"${cidrs4[@]}"}; do add4 "$cidr"; done
+for cidr in ${cidrs6[@]+"${cidrs6[@]}"}; do add6 "$cidr"; done
+
+resolved=0
+for domain in ${domains[@]+"${domains[@]}"}; do
+    found=false
+    # +short can emit CNAMEs alongside addresses, so keep only real addresses.
+    while read -r addr; do
+        [[ "$addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && add4 "${addr}/32" && found=true
+    done < <(dig +short +time=3 +tries=2 A "$domain" 2>/dev/null)
+    while read -r addr; do
+        [[ "$addr" == *:* ]] && add6 "${addr}/128" && found=true
+    done < <(dig +short +time=3 +tries=2 AAAA "$domain" 2>/dev/null)
+
+    if [[ "$found" == true ]]; then
+        resolved=$(( resolved + 1 ))
+    else
+        note "  WARNING: ${domain} did not resolve; traffic to it will be blocked"
+    fi
+done
+note "resolved ${resolved}/${#domains[@]} domains"
+
+if [[ "$want_github_meta" == true ]]; then
+    # GitHub's named hosts sit behind large rotating pools, so a resolved address
+    # goes stale within minutes; these are the ranges that actually back them.
+    if meta="$(curl -fsSL --max-time 10 https://api.github.com/meta 2>/dev/null)"; then
+        while read -r cidr; do
+            [[ -z "$cidr" ]] && continue
+            if [[ "$cidr" == *:* ]]; then add6 "$cidr"; else add4 "$cidr"; fi
+        done < <(jq -r '[.web[]?, .api[]?, .git[]?, .packages[]?] | .[]' <<< "$meta")
+        note 'added GitHub published ranges from api.github.com/meta'
+    else
+        note 'WARNING: could not fetch api.github.com/meta; GitHub access may be partial'
+    fi
+fi
+
+ipset destroy "$SET4" 2>/dev/null || true
+ipset destroy "$SET6" 2>/dev/null || true
+ipset rename "${SET4}-new" "$SET4"
+ipset rename "${SET6}-new" "$SET6"
+note "set sizes: IPv4 $(ipset list "$SET4" | awk '/Number of entries/{print $NF}'), IPv6 $(ipset list "$SET6" | awk '/Number of entries/{print $NF}')"
+
+# ---------------------------------------------------------------------------
+# Apply the rules
+# ---------------------------------------------------------------------------
+apply_rules() { # apply_rules <iptables|ip6tables> <setname>
+    local ipt="$1" set="$2"
+
+    "$ipt" -F OUTPUT
+    "$ipt" -F INPUT
+    "$ipt" -F FORWARD
+
+    # Loopback, and traffic belonging to connections we already allowed.
+    "$ipt" -A INPUT  -i lo -j ACCEPT
+    "$ipt" -A OUTPUT -o lo -j ACCEPT
+    "$ipt" -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    "$ipt" -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    # ICMP. For IPv6 this is not optional: neighbour discovery and router
+    # advertisement ride on ICMPv6, so dropping it breaks the network outright
+    # rather than merely restricting it.
+    if [[ "$ipt" == ip6tables ]]; then
+        "$ipt" -A INPUT  -p icmpv6 -j ACCEPT
+        "$ipt" -A OUTPUT -p icmpv6 -j ACCEPT
+        # Link-local and multicast, also required by ND/RA/DHCPv6.
+        "$ipt" -A OUTPUT -d fe80::/10 -j ACCEPT
+        "$ipt" -A OUTPUT -d ff00::/8  -j ACCEPT
+    fi
+
+    # DNS must work for anything else to, including for the resolution above on the
+    # next container start.
+    "$ipt" -A OUTPUT -p udp --dport 53 -j ACCEPT
+    "$ipt" -A OUTPUT -p tcp --dport 53 -j ACCEPT
+
+    # The container's own attached subnets: the editor server and port forwarding
+    # talk to us over them, and blocking that breaks the VS Code connection rather
+    # than any egress. `proto kernel scope link` routes are exactly the
+    # directly-attached networks, so this needs no netmask arithmetic.
+    local family=-4
+    [[ "$ipt" == ip6tables ]] && family=-6
+    while read -r subnet; do
+        [[ -z "$subnet" || "$subnet" == default ]] && continue
+        "$ipt" -A INPUT  -s "$subnet" -j ACCEPT
+        "$ipt" -A OUTPUT -d "$subnet" -j ACCEPT
+    done < <(ip -o "$family" route show scope link proto kernel 2>/dev/null | awk '{print $1}')
+
+    # The allowlist itself.
+    "$ipt" -A OUTPUT -m set --match-set "$set" dst -j ACCEPT
+
+    # Everything else. REJECT rather than DROP so a blocked call fails fast with a
+    # clear error instead of hanging until the client times out.
+    if [[ "$ipt" == ip6tables ]]; then
+        "$ipt" -A OUTPUT -j REJECT --reject-with icmp6-port-unreachable
+    else
+        "$ipt" -A OUTPUT -j REJECT --reject-with icmp-port-unreachable
+    fi
+    "$ipt" -P INPUT DROP
+    "$ipt" -P FORWARD DROP
+    "$ipt" -P OUTPUT DROP
+}
+
+apply_rules iptables "$SET4"
+[[ "$have_ip6" == true ]] && apply_rules ip6tables "$SET6"
+
+# ---------------------------------------------------------------------------
+# Verify it actually works
+# ---------------------------------------------------------------------------
+# Rules being installed is not the same as rules taking effect. Two ways that has
+# already bitten: an nft-backed iptables where the `set` match silently does nothing,
+# and an IPv4-only ruleset on a dual-stack container where everything real went out
+# over v6. So probe each family separately and refuse to claim success otherwise.
+verify_failed=false
+
+probe() { # probe <-4|-6|""> <url>: 0 if the transport connected, whatever the HTTP status
+    local fam="$1" url="$2"
+    if [[ -n "$fam" ]]; then
+        curl "$fam" -sS --max-time 8 -o /dev/null "$url" >/dev/null 2>&1
+    else
+        curl -sS --max-time 8 -o /dev/null "$url" >/dev/null 2>&1
+    fi
+}
+
+for family in -4 -6; do
+    # Only test a family the container actually has global connectivity on.
+    if [[ "$family" == '-6' ]]; then
+        ip -6 addr show scope global 2>/dev/null | grep -q inet6 || continue
+        [[ "$have_ip6" == true ]] || { note 'VERIFY FAILED: global IPv6 present but ip6tables unavailable'; verify_failed=true; continue; }
+    fi
+
+    if ! probe "$family" https://api.anthropic.com/; then
+        note "VERIFY FAILED: allowlisted host unreachable over IPv${family#-} (api.anthropic.com)"
+        verify_failed=true
+    fi
+    if probe "$family" https://example.com; then
+        note "VERIFY FAILED: non-allowlisted host reachable over IPv${family#-} (example.com)"
+        verify_failed=true
+    fi
+done
+
+# And once more without forcing a family, which is what real clients do.
+if probe '' https://example.com; then
+    note 'VERIFY FAILED: example.com is reachable with the default family selection'
+    verify_failed=true
+fi
+
+if [[ "$verify_failed" == true ]]; then
+    write_state broken
+    die 'the egress allowlist did not behave as expected; refusing to report it as active'
+fi
+
+write_state on
+note 'egress restricted to the allowlist over IPv4 and IPv6, verified'

@@ -1,0 +1,5 @@
+# Fixture artefacts from running the smoke test locally.
+test/python/.venv/
+test/python/uv.lock
+test/python/.ruff_cache/
+test/python/__pycache__/

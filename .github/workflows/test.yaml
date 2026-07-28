@@ -1,0 +1,198 @@
+name: test
+
+# Builds the images and exercises them against test/python/, which is a fixture
+# consumer repo. The interesting cases are the negative ones: a gate that stops
+# refusing, or an isolation check that stops noticing, fails silently in a way that
+# only shows up when it matters.
+#
+# Runs on docker rather than podman: GitHub runners have docker, and nothing being
+# tested here is podman-specific. The podman-only parts (up.sh, --userns=keep-id)
+# are exercised by hand on the host -- see the README.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build base
+        uses: docker/build-push-action@v6
+        with:
+          context: base
+          load: true
+          tags: dc-base:test
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,scope=base,mode=max
+
+      - name: Build python
+        uses: docker/build-push-action@v6
+        with:
+          context: python
+          load: true
+          build-args: BASE_REF=dc-base:test
+          tags: dc-python:test
+          cache-from: type=gha,scope=python
+          cache-to: type=gha,scope=python,mode=max
+
+      # --- Image-level checks, no dev container involved -------------------
+      # NET_ADMIN is granted so the firewall can actually apply; the smoke script
+      # runs the gate's negative cases itself.
+      - name: Smoke test (firewall off)
+        run: |
+          docker run --rm \
+            --cap-add=NET_ADMIN --cap-add=NET_RAW \
+            -e DEVCONTAINER_FIREWALL=off \
+            -v "${PWD}/test/python:/workspace" \
+            dc-python:test \
+            bash -c 'sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
+
+      - name: Smoke test (firewall on)
+        run: |
+          docker run --rm \
+            --cap-add=NET_ADMIN --cap-add=NET_RAW \
+            -e DEVCONTAINER_FIREWALL=on \
+            -v "${PWD}/test/python:/workspace" \
+            dc-python:test \
+            bash -c 'sudo -E /usr/local/bin/devcontainer-isolation && sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
+
+      # The firewall must configure ip6tables too, not only iptables. An IPv4-only
+      # ruleset looks perfectly correct under `iptables -S` while leaving every
+      # dual-stack destination reachable over v6, which is a hole this repo shipped
+      # once. Assert the v6 chain is actually locked down, independently of whether
+      # this particular runner has global IPv6 to test against.
+      - name: Firewall locks down IPv6 as well as IPv4
+        run: |
+          out=$(docker run --rm --cap-add=NET_ADMIN --cap-add=NET_RAW \
+            -e DEVCONTAINER_FIREWALL=on dc-python:test \
+            bash -c 'sudo -E /usr/local/bin/devcontainer-firewall >/dev/null 2>&1;
+                     echo "v4=$(sudo iptables -S OUTPUT | grep -c "^-P OUTPUT DROP")";
+                     echo "v6=$(sudo ip6tables -S OUTPUT | grep -c "^-P OUTPUT DROP")";
+                     echo "v6set=$(sudo ip6tables -S OUTPUT | grep -c "match-set devcontainer-allow6")";
+                     echo "icmpv6=$(sudo ip6tables -S OUTPUT | grep -c "p icmpv6 -j ACCEPT")"')
+          echo "$out"
+          for k in v4 v6 v6set icmpv6; do
+            grep -q "^${k}=1$" <<<"$out" || { echo "::error::${k} check failed"; exit 1; }
+          done
+          echo 'ok: both families default-DROP, v6 allowlist and ICMPv6 present'
+
+      # --- The gate must fail the container, not just complain -------------
+      - name: Firewall gate refuses an unset choice
+        run: |
+          if docker run --rm dc-python:test \
+              sudo -E /usr/local/bin/devcontainer-firewall; then
+            echo '::error::the firewall gate accepted an unset DEVCONTAINER_FIREWALL'
+            exit 1
+          fi
+          echo 'ok: unset DEVCONTAINER_FIREWALL fails the container'
+
+      - name: Firewall refuses firewall=on without NET_ADMIN
+        run: |
+          if docker run --rm -e DEVCONTAINER_FIREWALL=on dc-python:test \
+              sudo -E /usr/local/bin/devcontainer-firewall; then
+            echo '::error::firewall=on succeeded without NET_ADMIN; it cannot have applied any rules'
+            exit 1
+          fi
+          echo 'ok: firewall=on without NET_ADMIN fails the container'
+
+      # --- The isolation check must notice the things it exists for --------
+      - name: Isolation check rejects a writable extra mount
+        run: |
+          if docker run --rm \
+              -e DEVCONTAINER_FIREWALL=off \
+              -v "${PWD}/test/python:/workspace" \
+              -v "${PWD}/test:/mnt/host-escape" \
+              dc-python:test sudo -E /usr/local/bin/devcontainer-isolation; then
+            echo '::error::a writable extra bind mount was accepted'
+            exit 1
+          fi
+          echo 'ok: unexpected writable mount fails the container'
+
+      - name: Isolation check accepts an allowlisted read-only mount
+        run: |
+          docker run --rm \
+            -e DEVCONTAINER_FIREWALL=off \
+            -e DEVCONTAINER_EXTRA_MOUNTS=/mnt/models:ro \
+            -v "${PWD}/test/python:/workspace" \
+            -v "${PWD}/test:/mnt/models:ro" \
+            dc-python:test sudo -E /usr/local/bin/devcontainer-isolation
+          echo 'ok: a declared read-only mount is accepted'
+
+      - name: Isolation check rejects a declared mount that is writable
+        run: |
+          if docker run --rm \
+              -e DEVCONTAINER_FIREWALL=off \
+              -e DEVCONTAINER_EXTRA_MOUNTS=/mnt/models:ro \
+              -v "${PWD}/test/python:/workspace" \
+              -v "${PWD}/test:/mnt/models" \
+              dc-python:test sudo -E /usr/local/bin/devcontainer-isolation; then
+            echo '::error::a mount declared ro was accepted while mounted rw'
+            exit 1
+          fi
+          echo 'ok: ro-declared-but-rw-mounted fails the container'
+
+      - name: Isolation check rejects a forwarded ssh agent
+        run: |
+          if docker run --rm \
+              -e DEVCONTAINER_FIREWALL=off \
+              -e SSH_AUTH_SOCK=/tmp/agent.sock \
+              -v "${PWD}/test/python:/workspace" \
+              dc-python:test sudo -E /usr/local/bin/devcontainer-isolation; then
+            echo '::error::a forwarded SSH agent was accepted'
+            exit 1
+          fi
+          echo 'ok: SSH_AUTH_SOCK fails the container'
+
+      - name: Isolation check rejects a mounted container runtime socket
+        run: |
+          if docker run --rm \
+              -e DEVCONTAINER_FIREWALL=off \
+              -v "${PWD}/test/python:/workspace" \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              dc-python:test sudo -E /usr/local/bin/devcontainer-isolation; then
+            echo '::error::a mounted docker socket was accepted -- that is a container escape'
+            exit 1
+          fi
+          echo 'ok: a mounted runtime socket fails the container'
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning \
+            base/bin/devcontainer-firewall \
+            base/bin/devcontainer-isolation \
+            base/bin/statusline.sh \
+            src/python/.devcontainer/post-create.sh \
+            src/python/.devcontainer/up.sh \
+            src/python/.devcontainer/host-secrets.sh \
+            test/python/smoke.sh
+
+  zsh-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: zsh -n on the dotfiles
+        run: |
+          sudo apt-get update && sudo apt-get install -y zsh
+          for f in base/dotfiles/zshrc base/dotfiles/*.zsh; do
+            echo "== $f"
+            zsh -n "$f"
+          done

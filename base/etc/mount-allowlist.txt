@@ -1,0 +1,38 @@
+# Expected mounts, installed as /etc/devcontainer/mount-allowlist.txt and checked
+# by devcontainer-isolation on every container start.
+#
+# Format: <path> <rw|ro>. A leading ~ expands to the container user's home.
+#
+# The invariant this enforces is guarantee 1 of the isolation contract: /workspace
+# is the only writable window onto host files. Anything mounted that is not listed
+# here fails the container, and anything listed as ro that turns up rw fails it
+# too.
+#
+# Note that a named volume and a host bind mount are indistinguishable from inside
+# the container -- both are bind mounts of a host directory. So the volume targets
+# are listed here as well. They are writable by design; they live in podman's own
+# storage rather than at a host path, so writing to them does not touch the host
+# filesystem the user sees.
+#
+# A consumer with a legitimate extra mount adds it via DEVCONTAINER_EXTRA_MOUNTS
+# in devcontainer.json (space-separated path:mode pairs) rather than editing this.
+
+# The one writable host bind: the repository being worked on.
+/workspace                    rw
+
+# Named volumes for state that must survive a rebuild.
+~/.claude                     rw
+~/.cache                      rw
+~/.local/share/uv             rw
+/commandhistory               rw
+
+# The editor server, when VS Code or a JetBrains IDE attaches. A volume, not a
+# host path, but it has to be listed or every VS Code session fails the check.
+~/.vscode-server              rw
+~/.vscode-remote              rw
+~/.cursor-server              rw
+
+# peon-ping notification bridge, when the peonPing template option is on. Strictly
+# read-only: a writable bind here would let an agent in bypass mode edit hook
+# scripts that the *host* then executes.
+/opt/peon-ping                ro

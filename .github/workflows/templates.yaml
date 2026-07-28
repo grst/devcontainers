@@ -1,0 +1,91 @@
+name: templates
+
+# Publishes the devcontainer Templates in src/ as OCI artifacts.
+#
+#   ghcr.io/grst/devcontainer-templates/python
+#
+# Published with the devcontainer CLI rather than devcontainers/action, purely for
+# namespace control: the action derives the namespace from the repository, which
+# would put a template with id `python` at ghcr.io/grst/devcontainers/python --
+# exactly where the python *image* lives.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Package the templates but do not push
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - run: npm install -g @devcontainers/cli
+
+      # Catch a malformed devcontainer-template.json or an option that no longer
+      # matches what devcontainer.json references, before anything is published.
+      - name: Validate the template sources
+        run: |
+          for dir in src/*/; do
+            id="$(basename "$dir")"
+            echo "== ${id}"
+            jq -e --arg id "$id" '.id == $id' "${dir}devcontainer-template.json" >/dev/null \
+              || { echo "::error::${dir}devcontainer-template.json id must equal '${id}'"; exit 1; }
+
+            # Every ${templateOption:x} used in the template must be declared, and
+            # every declared option should be used -- an undeclared one is
+            # substituted with nothing and silently produces a broken config.
+            declared="$(jq -r '.options | keys[]' "${dir}devcontainer-template.json" | sort)"
+            used="$(grep -rhoE '\$\{templateOption:[A-Za-z0-9_]+\}' "$dir" \
+                     | sed -E 's/.*:([A-Za-z0-9_]+)\}/\1/' | sort -u)"
+            if [ -n "$(comm -13 <(echo "$declared") <(echo "$used"))" ]; then
+              echo "::error::${id}: undeclared options used: $(comm -13 <(echo "$declared") <(echo "$used") | tr '\n' ' ')"
+              exit 1
+            fi
+            if [ -n "$(comm -23 <(echo "$declared") <(echo "$used"))" ]; then
+              echo "::warning::${id}: declared but unused options: $(comm -23 <(echo "$declared") <(echo "$used") | tr '\n' ' ')"
+            fi
+
+            # The firewall option must have no default. That is the whole point of
+            # layer 1 of the gate, and it is the kind of thing a well-meaning edit
+            # would "fix" by adding one.
+            if jq -e '.options.firewall | has("default")' "${dir}devcontainer-template.json" >/dev/null; then
+              echo "::error::${id}: options.firewall must NOT have a default; the choice is mandatory"
+              exit 1
+            fi
+          done
+
+      - name: Log in to ghcr.io
+        if: inputs.dry-run != true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        if: inputs.dry-run != true
+        run: |
+          devcontainer templates publish \
+            --registry ghcr.io \
+            --namespace "${{ github.repository_owner }}/devcontainer-templates" \
+            ./src
+
+      - name: Dry run
+        if: inputs.dry-run == true
+        run: echo 'Validation passed; skipping publish because dry-run is set.'

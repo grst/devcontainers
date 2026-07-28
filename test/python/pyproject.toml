@@ -1,0 +1,14 @@
+# Fixture project for the smoke test. Pins nothing, so `uv sync` must resolve to
+# the image default (Python 3.14) -- which is one of the things being tested.
+[project]
+name = "devcontainer-smoke-fixture"
+version = "0.0.0"
+description = "Fixture used by test/python/smoke.sh; not published."
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.ruff]
+line-length = 120

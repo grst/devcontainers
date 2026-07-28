@@ -1,0 +1,36 @@
+{
+  "id": "python",
+  "version": "1.0.0",
+  "name": "Python (uv) + Claude Code, hardened",
+  "description": "Python dev container built on ghcr.io/grst/devcontainers/python: uv with Python 3.14, ruff, prek, Claude Code in auto mode, a mandatory egress-firewall choice, and an isolation check that keeps the workspace the only writable host path.",
+  "documentationURL": "https://github.com/grst/devcontainers",
+  "licenseURL": "https://github.com/grst/devcontainers/blob/main/LICENSE",
+  "publisher": "grst",
+  "keywords": ["python", "uv", "ruff", "claude-code", "podman"],
+  "platforms": ["Python"],
+  "options": {
+    "firewall": {
+      "type": "string",
+      "description": "Restrict outbound network traffic to an allowlist? There is deliberately no default: 'on' gives a default-DROP egress firewall (Anthropic API, PyPI, npm, GitHub, Ubuntu archive) and adds the NET_ADMIN/NET_RAW capabilities it needs; 'off' leaves egress unrestricted, which means an agent that reads a malicious file can reach any host on the internet. The container refuses to start until this is set.",
+      "enum": ["on", "off"]
+    },
+    "pythonVersion": {
+      "type": "string",
+      "description": "Default Python for a bare 'uv venv' / 'uv sync'. A project's own requires-python or .python-version still wins. 3.14 and 3.13 are baked into the image; anything else is downloaded on first use.",
+      "proposals": ["3.14", "3.13", "3.12"],
+      "default": "3.14"
+    },
+    "peonPing": {
+      "type": "string",
+      "description": "Wire Claude Code's hooks to the peon-ping notification relay on the host? Sounds and desktop notifications are played by the host relay; the hook directory is mounted read-only.",
+      "enum": ["on", "off"],
+      "default": "off"
+    },
+    "imageTag": {
+      "type": "string",
+      "description": "Tag of ghcr.io/grst/devcontainers/python to use.",
+      "proposals": ["latest", "1"],
+      "default": "latest"
+    }
+  }
+}
