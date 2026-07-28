@@ -101,6 +101,10 @@ jobs:
       # dual-stack destination reachable over v6, which is a hole this repo shipped
       # once. Assert the v6 chain is actually locked down, independently of whether
       # this particular runner has global IPv6 to test against.
+      #
+      # The ICMPv6 pattern is `ipv6-icmp`, not the `icmpv6` the script passes in:
+      # ip6tables accepts both spellings as input but canonicalises to the former when
+      # dumping with -S. Grepping for what was written finds nothing.
       - name: Firewall locks down IPv6 as well as IPv4
         run: |
           out=$(docker run --rm --cap-add=NET_ADMIN --cap-add=NET_RAW \
@@ -109,7 +113,7 @@ jobs:
                      echo "v4=$(sudo iptables -S OUTPUT | grep -c "^-P OUTPUT DROP")";
                      echo "v6=$(sudo ip6tables -S OUTPUT | grep -c "^-P OUTPUT DROP")";
                      echo "v6set=$(sudo ip6tables -S OUTPUT | grep -c "match-set devcontainer-allow6")";
-                     echo "icmpv6=$(sudo ip6tables -S OUTPUT | grep -c "p icmpv6 -j ACCEPT")"')
+                     echo "icmpv6=$(sudo ip6tables -S OUTPUT | grep -c "p ipv6-icmp -j ACCEPT")"')
           echo "$out"
           for k in v4 v6 v6set icmpv6; do
             grep -q "^${k}=1$" <<<"$out" || { echo "::error::${k} check failed"; exit 1; }
