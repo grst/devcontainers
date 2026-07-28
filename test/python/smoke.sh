@@ -28,7 +28,7 @@ echo
 echo '== tools on PATH =='
 for tool in zsh git gh jq yq fzf fd rg rga bat delta mlr tree nvim tmux direnv \
             node npm claude ipset iptables dig \
-            uv uvx python ruff prek pre-commit ipython zizmor cruft chromium; do
+            uv uvx python ruff prek pre-commit hatch ipython zizmor cruft chromium; do
     check "$tool" command -v "$tool"
 done
 
@@ -172,6 +172,23 @@ case "$fw_state" in
         bad "firewall.state is '${fw_state}'; postStartCommand did not run"
         ;;
 esac
+
+echo
+echo '== hatch =='
+# hatch is available alongside uv. What matters is that its state lands on the volume
+# rather than in the workspace or an image layer, and that it reuses the image's uv
+# instead of downloading a second private copy.
+hatch_data="$(hatch config show 2>/dev/null | sed -n 's/^data *= *"\(.*\)"$/\1/p')"
+case "$hatch_data" in
+    "$HOME"/.local/share/hatch) ok "hatch data dir is on the volume (${hatch_data})" ;;
+    '')                         bad 'could not read hatch data dir from `hatch config show`' ;;
+    *)                          bad "hatch data dir is ${hatch_data}, expected ~/.local/share/hatch" ;;
+esac
+if [ "${HATCH_ENV_TYPE_VIRTUAL_UV_PATH:-}" = "$(command -v uv)" ]; then
+    ok 'hatch is pointed at the image uv, not a private download'
+else
+    bad "HATCH_ENV_TYPE_VIRTUAL_UV_PATH is '${HATCH_ENV_TYPE_VIRTUAL_UV_PATH:-<unset>}', expected $(command -v uv)"
+fi
 
 echo
 echo '== python project workflow =='

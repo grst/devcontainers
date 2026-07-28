@@ -55,6 +55,10 @@
     "source=claude-config-${devcontainerId},target=/home/vscode/.claude,type=volume",
     "source=cache-${devcontainerId},target=/home/vscode/.cache,type=volume",
     "source=uv-${devcontainerId},target=/home/vscode/.local/share/uv,type=volume",
+    // hatch environments and its managed interpreters. Kept out of the workspace
+    // bind mount on purpose, so they neither land in the repo nor collide with a
+    // hatch run on the host.
+    "source=hatch-${devcontainerId},target=/home/vscode/.local/share/hatch,type=volume",
     "source=history-${devcontainerId},target=/commandhistory,type=volume",
     "source=${localEnv:HOME}/.claude/hooks/peon-ping,target=/opt/peon-ping,type=bind,readonly"
   ],

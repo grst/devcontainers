@@ -66,15 +66,34 @@ RUN ln -sf "$(uv python find 3.14 2>/dev/null)" /usr/local/bin/python3 \
 #
 # prek is the Rust reimplementation of pre-commit and is what actually gets used;
 # pre-commit itself is here because some repos' hooks invoke it by name.
+#
+# hatch is here alongside uv, not instead of it: uv drives the container's own
+# post-create (`uv sync`) and is the default for a project that expresses no
+# preference, while a repo whose pyproject.toml defines hatch environments or a
+# version matrix works without any extra setup.
 RUN uv tool install --no-cache ruff \
     && uv tool install --no-cache prek \
     && uv tool install --no-cache pre-commit \
+    && uv tool install --no-cache hatch \
     && uv tool install --no-cache ipython \
     && uv tool install --no-cache zizmor \
     && uv tool install --no-cache cruft \
     && chown -R "${USERNAME}:${USERNAME}" /opt/uv \
     && chmod -R a+rX /opt/uv \
-    && ruff --version && prek --version
+    && ruff --version && prek --version && hatch --version
+
+# Point hatch at the uv already in the image. Left unset, hatch downloads its own
+# private copy into its data directory the first time an environment uses
+# `installer = "uv"` -- a second uv, on a different release cadence, for no reason.
+#
+# hatch keeps environments and its managed interpreters under ~/.local/share/hatch,
+# which devcontainer.json puts on a named volume. Without that, every rebuild would
+# re-create environments and re-download interpreters; it is also why the directory
+# must not live in the workspace bind mount, where it would collide with a hatch run
+# on the host.
+ENV HATCH_ENV_TYPE_VIRTUAL_UV_PATH=/usr/local/bin/uv
+RUN mkdir -p "/home/${USERNAME}/.local/share/hatch" \
+    && chown -R "${USERNAME}:${USERNAME}" "/home/${USERNAME}/.local/share/hatch"
 
 # ---------------------------------------------------------------------------
 # Headless browser

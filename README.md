@@ -7,7 +7,7 @@ and for being equally usable from a terminal and from VS Code.
 | | |
 | --- | --- |
 | `ghcr.io/grst/devcontainers/base` | zsh + dotfiles, CLI tools, Claude Code, the firewall and isolation checks. No language toolchain. |
-| `ghcr.io/grst/devcontainers/python` | the above plus uv, Python 3.14, ruff, prek, headless chromium. |
+| `ghcr.io/grst/devcontainers/python` | the above plus uv and hatch, Python 3.14, ruff, prek, headless Chrome. |
 | `ghcr.io/grst/devcontainer-templates/python` | the devcontainer Template that generates a repo's `.devcontainer/`. |
 
 A future `rust/Dockerfile` layers on the same base and inherits all of it. Nothing
@@ -274,19 +274,48 @@ in `base/dotfiles/` and get their dots in the Dockerfile.
 
 ## Python
 
-uv-first; no hatch. `UV_PYTHON=3.14` makes a bare `uv venv` / `uv sync` resolve to
-3.14, while a project's own `requires-python` or `.python-version` still wins. 3.14
-and 3.13 are baked in; anything else is downloaded on first use. `uv python install
-3.12` works at runtime, but lands in an image layer rather than a volume, so add the
-version to `python/Dockerfile` if you want it to stick.
+**uv is the default; hatch is available.** `uv` drives the container's own
+post-create (`uv sync --all-groups`) and handles a project that expresses no
+preference, while a repo whose `pyproject.toml` defines hatch environments or a
+version matrix works with no extra setup.
 
-`~/.cache` (which holds `UV_CACHE_DIR`) and `~/.local/share/uv` are both on volumes,
-so wheels and managed interpreters survive a rebuild.
+`UV_PYTHON=3.14` makes a bare `uv venv` / `uv sync` resolve to 3.14, while a
+project's own `requires-python` or `.python-version` still wins. 3.14 and 3.13 are
+baked in; anything else is downloaded on first use. `uv python install 3.12` works at
+runtime, but lands in an image layer rather than a volume, so add the version to
+`python/Dockerfile` if you want it to stick.
 
-Globally available via `uv tool`, isolated from any project venv: `ruff`, `prek`,
-`pre-commit`, `ipython`, `zizmor`, `cruft`.
+Three volumes keep Python state across rebuilds: `~/.cache` (which holds
+`UV_CACHE_DIR` and hatch's cache), `~/.local/share/uv`, and `~/.local/share/hatch`.
+So wheels, uv-managed interpreters, hatch environments and `hatch python install`
+downloads all survive. Hatch's data directory is deliberately *not* in the workspace,
+so it neither lands in the repo nor collides with a hatch run on the host.
 
-Headless chromium is installed so an agent can look at rendered HTML:
+`HATCH_ENV_TYPE_VIRTUAL_UV_PATH` points hatch at the uv already in the image. Left
+unset, hatch downloads its own private copy the first time an environment uses
+`installer = "uv"` — a second uv on a different release cadence, for no reason. To
+have hatch resolve with uv, add to `pyproject.toml`:
+
+```toml
+[tool.hatch.envs.default]
+installer = "uv"
+```
+
+`hatch python install 3.11 3.13` lands on the volume, so a matrix like
+`[[tool.hatch.envs.test.matrix]] python = ["3.11", "3.12", "3.13"]` only downloads
+once.
+
+Globally available via `uv tool`, each isolated from any project venv and from each
+other: `ruff`, `prek`, `pre-commit`, `hatch`, `ipython`, `zizmor`, `cruft`.
+
+A headless browser is installed so an agent can look at rendered HTML. It is
+**Google Chrome**, with `chromium` as a symlink to it, and that is not arbitrary: on
+Ubuntu, `apt install chromium` gets you a *snap transitional package* — a 2.4 kB shell
+script that shells out to snapd, which does not exist in a container. apt reports
+success and leaves you with no working browser. (The Debian-based predecessor of this
+image had a real chromium deb, which makes this an easy trap when porting.) Google
+publishes no Chrome deb for arm64, so the python image fails the build loudly on that
+arch rather than producing an image with no browser.
 
 ```bash
 chromium --headless --no-sandbox --disable-gpu --hide-scrollbars \
@@ -295,10 +324,10 @@ chromium --headless --no-sandbox --disable-gpu --hide-scrollbars \
 chromium --headless --no-sandbox --dump-dom file:///workspace/report.html
 ```
 
-`--no-sandbox` is required: chromium's own sandbox needs privileges the container does
-not have, and the container is already the isolation boundary. Installing Debian's
-chromium also pulls in the shared libraries Playwright's own build needs, so
-`playwright install chromium` works without `--with-deps`.
+`--no-sandbox` is required: the browser's own sandbox needs privileges the container
+does not have, and the container is already the isolation boundary. Chrome's deb also
+pulls in the shared libraries Playwright's own build needs, so `playwright install
+chromium` works without `--with-deps`.
 
 ## peon-ping
 
