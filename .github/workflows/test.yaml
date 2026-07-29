@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # The container user is vscode, uid 1000; the runner checks out as uid 1001. The
       # workspace bind would be mounted rw but unwritable, so `uv sync` fails on
