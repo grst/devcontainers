@@ -25,7 +25,7 @@ _fzf_compgen_dir() {
 
 # `fzf --zsh` emits key bindings and completion in one go; it needs fzf >= 0.48
 # and Ubuntu 26.04 ships 0.67. Fall back to the packaged scripts just in case the
-# base image ever moves to an older distro.
+# image ever moves to an older distro.
 if fzf --zsh >/dev/null 2>&1; then
     eval "$(fzf --zsh)"
 else

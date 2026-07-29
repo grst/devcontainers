@@ -5,7 +5,7 @@
 # anything that assumes Arch, X11, a desktop session, conda, or access to the
 # host's credentials. See ../../README.md for what was dropped and why.
 #
-# Installed to both /etc/skel/.zshrc and ~/.zshrc by base/Dockerfile.
+# Installed to both /etc/skel/.zshrc and ~/.zshrc by the Dockerfile.
 
 # ---------------------------------------------------------------------------
 # History
