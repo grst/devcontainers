@@ -72,7 +72,7 @@ jobs:
       # amd64 only, which is what the runner is, so `platforms:` is left at its
       # default. The Dockerfile hardcodes the same assumption.
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: python
           push: true
