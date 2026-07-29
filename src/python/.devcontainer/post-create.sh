@@ -43,6 +43,10 @@ write_json "$CLAUDE_DIR/.claude.json" \
 
 # Pre-approve the API key, matched by its last 20 characters, which is how the CLI
 # records the approval -- otherwise the first launch asks about it.
+#
+# Note the test is for a *non-empty* value. remoteEnv substitutes ${localEnv:X} with an
+# empty string when X is unset on the host, so a missing secret arrives here as
+# ANTHROPIC_API_KEY='' rather than as an unset variable.
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     write_json "$CLAUDE_DIR/.claude.json" \
         '.customApiKeyResponses = ((.customApiKeyResponses // {})
@@ -50,8 +54,46 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
             | .rejected = (.rejected // []))' \
         --arg k "${ANTHROPIC_API_KEY: -20}"
     echo '    ANTHROPIC_API_KEY found and pre-approved'
+elif [ -s "$CLAUDE_DIR/.credentials.json" ]; then
+    echo '    No ANTHROPIC_API_KEY, but a stored login is present in the config volume'
 else
-    echo "    No ANTHROPIC_API_KEY; run 'claude' once and log in (persists in the volume)"
+    # Loud on purpose, and last-but-one in the output so it is the thing still on
+    # screen. This is the state that prompted the check: no key, no stored login, and
+    # `claude` announcing it is not logged in only once you try to use it.
+    #
+    # Not a hard failure: `claude` can complete an interactive OAuth login inside the
+    # container, and post-create running before that is possible must not block it.
+    # The host side (up.sh) is where a missing secret *is* fatal, because that is where
+    # KeePassXC can be reached and the cause reported.
+    cat >&2 <<'EOF'
+
+    ####################################################################
+    #  No Claude Code credentials in this container                    #
+    #                                                                  #
+    #  ANTHROPIC_API_KEY is empty and the config volume holds no login,#
+    #  so `claude` will start unauthenticated.                         #
+    #                                                                  #
+    #  Started with up.sh?  It should have failed before creating this #
+    #  container -- check that .devcontainer/host-secrets.sh ran.      #
+    #                                                                  #
+    #  Started from VS Code?  up.sh never runs, and remoteEnv resolves #
+    #  ${localEnv:...} against the VS Code process environment, so a   #
+    #  desktop-launched window has nothing to pass. Either launch      #
+    #  `code` from a shell that has the variables exported, or run     #
+    #  `claude` once in here and log in -- that login persists in the  #
+    #  volume across rebuilds.                                         #
+    ####################################################################
+
+EOF
+fi
+
+# gh falls back to unauthenticated access, which is rate-limited to 60 requests/hour
+# and cannot see private repositories, so say so rather than letting it surprise an
+# agent mid-task.
+if [ -n "${GH_TOKEN:-}" ]; then
+    echo '    GH_TOKEN present (read-only by design; run `gh auth login` here to push)'
+else
+    echo '    No GH_TOKEN; gh is unauthenticated (60 req/hour, public repos only)'
 fi
 
 # ---------------------------------------------------------------------------

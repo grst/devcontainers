@@ -22,10 +22,31 @@ cd "$(dirname "$0")/.."
 # the systemd user bus instead makes D-Bus try to activate a *second* KeePassXC and
 # time out. So fetch the secrets while we still have the inherited bus, and only
 # then repoint DBUS_SESSION_BUS_ADDRESS for podman below.
-if [ -x .devcontainer/host-secrets.sh ]; then
+if [ "${DEVCONTAINER_SKIP_SECRETS:-0}" = 1 ]; then
+    echo 'up.sh: DEVCONTAINER_SKIP_SECRETS=1 -- starting with no secrets' >&2
+else
+    # Invoked through `bash`, and tested with -r rather than -x. `devcontainer
+    # templates apply` copies these files with whatever mode they had in the template,
+    # and an `[ -x ]` guard here silently turned the entire block into a no-op when the
+    # exec bit was missing: no lookup, no password prompt, no error, and a container
+    # where Claude Code simply was not logged in.
+    if [ ! -r .devcontainer/host-secrets.sh ]; then
+        echo 'up.sh: .devcontainer/host-secrets.sh is missing -- re-apply the template' >&2
+        exit 1
+    fi
+
+    # Command substitution, not process substitution: `while read < <(cmd)` discards
+    # cmd's exit status, so a failed fetch was indistinguishable from an empty one.
+    # Keeping the values in a variable also avoids putting them in a temporary file.
+    if ! secrets="$(bash .devcontainer/host-secrets.sh)"; then
+        echo 'up.sh: refusing to start the container without its secrets (see above)' >&2
+        exit 1
+    fi
     while IFS='=' read -r name value; do
-        [ -n "$name" ] && export "${name}=${value}"
-    done < <(.devcontainer/host-secrets.sh || true)
+        [ -n "$name" ] || continue
+        export "${name}=${value}"
+    done <<<"$secrets"
+    unset secrets
 fi
 
 # ---------------------------------------------------------------------------

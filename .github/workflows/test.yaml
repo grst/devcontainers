@@ -203,6 +203,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      # `devcontainer templates apply` copies these into a consumer repo with the mode
+      # they have here. A missing exec bit on host-secrets.sh silently disabled secret
+      # fetching in every applied repo -- up.sh's `[ -x ]` guard made it a no-op with
+      # no error -- so the mode is now part of the contract rather than an accident.
+      - name: Template scripts are executable
+        run: |
+          rc=0 n=0
+          while read -r mode _ _ path; do
+            n=$((n + 1))
+            case "$mode" in
+              100755) ;;
+              *) echo "::error::${path} is mode ${mode}; must be 100755"; rc=1 ;;
+            esac
+          done < <(git ls-files -s 'src/*/.devcontainer/*.sh')
+          # An empty match would otherwise pass, which is the same shape of silent
+          # success this check exists to catch.
+          [ "$n" -gt 0 ] || { echo '::error::no template scripts matched'; rc=1; }
+          echo "checked ${n} template scripts"
+          exit "$rc"
+
       - name: shellcheck
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck

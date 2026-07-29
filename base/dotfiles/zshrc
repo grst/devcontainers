@@ -103,6 +103,19 @@ done
 unset _dc_rc
 
 # ---------------------------------------------------------------------------
+# Secrets that did not arrive
+# ---------------------------------------------------------------------------
+# devcontainer.json passes these through remoteEnv as ${localEnv:NAME}, and the CLI
+# substitutes an empty string when the host variable is unset -- so they arrive *set
+# and empty* rather than absent. Drop the empties: a tool that checks "is this
+# variable set" would otherwise try to authenticate with nothing and fail in a way
+# that looks like a rejected credential rather than a missing one.
+for _dc_secret in ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN; do
+    [[ -z "${(P)_dc_secret}" ]] && unset "$_dc_secret"
+done
+unset _dc_secret
+
+# ---------------------------------------------------------------------------
 # Claude Code
 # ---------------------------------------------------------------------------
 # The container starts sessions in auto mode (post-create.sh writes

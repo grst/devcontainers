@@ -200,13 +200,31 @@ copy to maintain rather than one vendored per repo.
 
 Nothing sensitive is mounted, so credentials arrive as environment variables that
 `up.sh` resolves on the host via `host-secrets.sh`. Each one is looked up as: already
-exported → Secret Service (KeePassXC FdoSecrets) → `keepassxc-cli`. A secret that
-cannot be resolved is simply omitted; nothing is fatal.
+exported → Secret Service (KeePassXC FdoSecrets) → `keepassxc-cli`, which prompts once
+for the master password and reuses it for every entry.
+
+**A secret that cannot be resolved is fatal**: `up.sh` prints which lookup layer was
+unavailable and refuses to create the container. To start one anyway, say so:
+
+```bash
+DEVCONTAINER_SKIP_SECRETS=1 .devcontainer/up.sh
+```
+
+This used to be a warning, which turned out to be useless — a stopped KeePassXC, a
+mistyped entry title and a `host-secrets.sh` that had lost its exec bit all produced
+the same silent success, and the first sign of trouble was `claude` not being logged in
+inside a container that had already started.
 
 | Variable | KeePassXC entry title | Notes |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | `Anthropic API key` | Optional. Without it, `claude` uses the login stored in the config volume, which survives rebuilds. |
+| `ANTHROPIC_API_KEY` | `Anthropic API key` | Without it, `claude` uses the login stored in the config volume, which survives rebuilds. |
 | `GH_TOKEN` | `GitHub read-only token (devcontainer)` | Must be **read-only**. |
+
+The `keepassxc-cli` layer needs no configuration: the database is discovered from
+`LastActiveDatabase` in `~/.cache/keepassxc/keepassxc.ini` — the *cache* config, which
+is where KeePassXC 2.7+ records the databases it would reopen. Set `KEEPASSXC_DB` to
+override. Entries inside a group are found by title via `keepassxc-cli locate`, so
+`show`'s requirement for a full `Group/Title` path is not something you have to know.
 
 Override a title per machine: `export ANTHROPIC_KEY_ENTRY=...`, `export
 GH_TOKEN_ENTRY=...`.
@@ -234,6 +252,15 @@ Two things that will bite you otherwise:
   secrets; a bare `podman exec` does not. And `${localEnv:...}` resolves against the
   *VS Code process* environment, so a desktop-launcher instance has nothing — start
   `code` from a shell that ran the fetch, or use the terminal workflow.
+- **The VS Code path cannot fetch anything itself.** `up.sh` never runs there, and
+  `initializeCommand` cannot export variables back to the CLI, so there is no hook that
+  could reach KeePassXC. Reopen-in-Container therefore depends entirely on the
+  variables already being in VS Code's environment. When they are not, `post-create.sh`
+  says so in a banner rather than leaving you to discover it from `claude`.
+- An unset host variable is not passed through as *unset*: the CLI substitutes
+  `${localEnv:X}` with an empty string, so it arrives set-and-empty. The container
+  `zshrc` unsets the empties, so a tool testing "is this set" does not try to
+  authenticate with nothing and report it as a rejected credential.
 
 KeePassXC one-time setup: *Settings → Secret Service Integration → Enable*, then
 *Manage exposed database groups* and tick only the group holding these entries.
