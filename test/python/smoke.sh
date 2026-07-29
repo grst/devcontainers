@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke test, run inside a built container.
 #
-#   podman run --rm -v "$PWD/test/python:/workspace:ro" <image> bash /workspace/smoke.sh
+#   podman run --rm -v "$PWD/test/python:/workspace" <image> bash /workspace/smoke.sh
 #
 # or, against a running dev container:
 #
@@ -91,29 +91,21 @@ check 'no ~/.gitconfig shadowing the system one' bash -c '[ ! -f "$HOME/.gitconf
 
 echo
 echo '== isolation =='
-# Guarantee 1: nothing writable but the workspace.
-# fuse.fuse-overlayfs alongside overlay: rootless podman uses it for the container's
-# own root filesystem when the kernel overlay driver is unavailable, and without it the
-# list below reports / as an unexpected writable mount.
-writable_binds="$(awk '$0 !~ / - (overlay|fuse\.fuse-overlayfs|proc|sysfs|devpts|mqueue|tmpfs|devtmpfs|cgroup|cgroup2|securityfs|bpf|tracefs|debugfs|configfs|fusectl|pstore|nsfs|binfmt_misc|hugetlbfs|autofs) / && $6 ~ /^rw/ {print $5}' \
-    /proc/self/mountinfo | grep -Ev '^(/proc|/sys|/dev)' | sort)"
-echo "        writable non-pseudo mounts: $(echo "$writable_binds" | tr '\n' ' ')"
-# Mounted rw *and* actually writable by this user -- the mount flag alone says nothing
-# about ownership, and a workspace owned by a uid this container cannot map surfaces
-# far downstream as a mystery `uv sync` failure instead of an isolation-check failure.
-if [ -z "$(echo "$writable_binds" | grep -Fx /workspace)" ]; then
-    bad '/workspace is not mounted read-write'
-elif touch /workspace/.write-probe 2>/dev/null; then
+# devcontainer-isolation is authoritative for the mount scan, the runtime socket, the
+# forwarded agent and the credential directories -- it is invoked below rather than
+# reimplemented here, which is how the two copies of its pseudo-filesystem ignore list
+# drifted apart in the first place.
+check 'the isolation check itself passes' sudo /usr/local/bin/devcontainer-isolation
+
+# Not covered by that check: the mount flag says nothing about ownership, and a
+# workspace owned by a uid this container cannot map surfaces far downstream as a
+# mystery `uv sync` failure instead of an isolation failure.
+if touch /workspace/.write-probe 2>/dev/null; then
     rm -f /workspace/.write-probe
     ok '/workspace is writable'
 else
-    bad "/workspace is mounted rw but not writable by $(id -un) -- it is owned by uid $(stat -c %u /workspace)"
+    bad "/workspace is not writable by $(id -un) -- it is owned by uid $(stat -c %u /workspace)"
 fi
-check 'no container runtime socket' bash -c '! ls /var/run/docker.sock /run/docker.sock /run/podman/podman.sock 2>/dev/null | grep -q .'
-check 'no forwarded ssh agent' bash -c '[ -z "${SSH_AUTH_SOCK:-}" ]'
-check 'no host ssh keys' bash -c '[ -z "$(ls -A "$HOME/.ssh" 2>/dev/null)" ]'
-check 'no host gnupg' bash -c '[ -z "$(ls -A "$HOME/.gnupg" 2>/dev/null)" ]'
-check 'host home is not reachable' bash -c '! ls /home/sturm 2>/dev/null'
 if [ -e /opt/peon-ping ]; then
     if touch /opt/peon-ping/.write-probe 2>/dev/null; then
         rm -f /opt/peon-ping/.write-probe
@@ -124,7 +116,6 @@ if [ -e /opt/peon-ping ]; then
 else
     skip '/opt/peon-ping is not mounted'
 fi
-check 'the isolation check itself passes' sudo /usr/local/bin/devcontainer-isolation
 
 echo
 echo '== firewall gate =='
@@ -148,6 +139,10 @@ fw_state="$(cat /run/devcontainer/firewall.state 2>/dev/null || echo unset)"
 echo "        firewall.state = ${fw_state}"
 case "$fw_state" in
     on)
+        # Only the positive half. devcontainer-firewall's own verification probes
+        # example.com per family and refuses to write state=on unless every one of
+        # them was blocked, so reaching this branch at all has already asserted it.
+        #
         # HEAD, not GET. https://pypi.org/simple/ is the full index -- 44 MB -- so a
         # GET with any sane --max-time reports a timeout that looks exactly like the
         # host being blocked. This probe is about reachability, so ask for headers.
@@ -156,23 +151,6 @@ case "$fw_state" in
         else
             bad 'an allowlisted host (pypi.org) is NOT reachable'
         fi
-        # Checked per family, not just with the default selection. An IPv4-only
-        # ruleset on a dual-stack container passes the plain check while leaving
-        # everything reachable over v6 -- that is a hole this repo actually shipped
-        # once, so it gets its own assertions.
-        for fam in '' -4 -6; do
-            label="${fam:-default family}"
-            if [ "$fam" = '-6' ] && ! ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
-                skip 'IPv6 egress check (no global IPv6 in this container)'
-                continue
-            fi
-            # shellcheck disable=SC2086 # $fam is intentionally unquoted/empty
-            if curl $fam -sS --max-time 5 -o /dev/null https://example.com 2>/dev/null; then
-                bad "example.com is reachable over ${label} -- egress is not restricted"
-            else
-                ok "example.com is blocked over ${label}"
-            fi
-        done
         ;;
     off)
         # Not a skip. "firewall off" means unrestricted egress, so the interesting

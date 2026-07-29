@@ -26,10 +26,7 @@
 ~/.local/share/uv             rw
 /commandhistory               rw
 
-# Used by the python image: hatch keeps its environments and managed interpreters
-# here. Listed in the base allowlist because this file covers every mount a consumer
-# may legitimately have, not only the ones this image creates -- the same reason
-# ~/.vscode-server and /opt/peon-ping are below.
+# hatch keeps its environments and managed interpreters here.
 ~/.local/share/hatch          rw
 
 # The editor server, when VS Code or a JetBrains IDE attaches. A volume, not a

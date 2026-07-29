@@ -7,14 +7,12 @@ updates:
     cooldown:
       default-days: 7
 
-  # Keeps the FROM lines current. The pinned tool versions inside the Dockerfiles
+  # Keeps the FROM line current. The pinned tool versions in the Dockerfile
   # (YQ_VERSION, RGA_VERSION, NODE_VERSION, UV_VERSION) are plain ARGs that
-  # dependabot does not track -- `grep -rn '^ARG .*VERSION' base python` lists all
-  # of them for a manual bump.
+  # dependabot does not track -- `grep -n '^ARG .*VERSION' python/Dockerfile`
+  # lists all of them for a manual bump.
   - package-ecosystem: docker
-    directories:
-      - /base
-      - /python
+    directory: /python
     schedule:
       interval: monthly
     cooldown:

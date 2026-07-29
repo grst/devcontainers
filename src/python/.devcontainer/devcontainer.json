@@ -2,32 +2,24 @@
   "name": "python (uv + Claude Code)",
   "image": "ghcr.io/grst/devcontainers/python:${templateOption:imageTag}",
 
-  // Rootless podman. keep-id maps the host uid to the same uid inside the
-  // container so files written to the workspace bind mount keep their ownership;
-  // label=disable is a no-op without SELinux but avoids relabelling issues on
-  // hosts that have it.
+  // Rootless podman. keep-id maps the host uid to the same uid inside the container
+  // so workspace files keep their ownership; label=disable avoids SELinux
+  // relabelling. The CLI adds both itself when it detects podman, but that is
+  // undocumented internal behaviour and VS Code takes a different path, so they stay
+  // explicit -- a duplicate on the podman command line is harmless.
   //
-  // NET_ADMIN and NET_RAW are present unconditionally, not only when the firewall
-  // is on. In a rootless podman user namespace they confer power over the
-  // container's own network namespace and nothing else, so they are not a host
-  // privilege -- and having them here means turning the firewall on later is a
-  // one-word edit instead of also remembering these.
-  //
-  // pasta's map-host-loopback lets host.docker.internal reach services bound to
-  // the host's loopback, which is how the peon-ping relay is reached. With
-  // firewall=on the host is still unreachable unless the peon allowlist fragment
-  // is installed, which post-create.sh does only when peonPing=on.
-  //
-  // The devcontainer CLI adds --userns=keep-id and --security-opt label=disable of
-  // its own accord when it detects podman, so those two appear twice on the podman
-  // command line. That is harmless (the last wins) and they are kept explicit here
-  // because that auto-detection is the CLI's internal behaviour, not a documented
-  // guarantee, and VS Code's extension takes a different code path.
+  // NET_ADMIN and NET_RAW are unconditional, not only for firewall=on. In a rootless
+  // user namespace they confer power over the container's own network namespace and
+  // nothing else, so turning the firewall on later is a one-word edit.
   "runArgs": [
     "--userns=keep-id",
     "--security-opt=label=disable",
     "--cap-add=NET_ADMIN",
     "--cap-add=NET_RAW",
+    // map-host-loopback lets the container reach services on the host's loopback,
+    // which is how the peon-ping relay is reached (still blocked under firewall=on
+    // unless post-create.sh installs the peon allowlist fragment).
+    //
     // 169.254.1.1 specifically, which is podman's own default for this mapping -- do not
     // "tidy" it to another link-local address. When the host resolves through a stub
     // resolver on loopback (systemd-resolved, a VPN), podman writes 169.254.1.1 into the
@@ -53,8 +45,8 @@
   "initializeCommand": "mkdir -p \"${localEnv:HOME}/.claude/hooks/peon-ping\"",
 
   // Everything except the workspace is either a named volume (podman's own
-  // storage, not a host path) or read-only. See the isolation contract in the
-  // README; devcontainer-isolation enforces this list on every start.
+  // storage, not a host path) or read-only. devcontainer-isolation enforces this
+  // against /etc/devcontainer/mount-allowlist.txt on every start.
   //
   // ${devcontainerId} keys the volumes to this repo automatically, so nothing has
   // to be renamed per project and two repos never share a Claude login or cache.
@@ -62,9 +54,6 @@
     "source=claude-config-${devcontainerId},target=/home/vscode/.claude,type=volume",
     "source=cache-${devcontainerId},target=/home/vscode/.cache,type=volume",
     "source=uv-${devcontainerId},target=/home/vscode/.local/share/uv,type=volume",
-    // hatch environments and its managed interpreters. Kept out of the workspace
-    // bind mount on purpose, so they neither land in the repo nor collide with a
-    // hatch run on the host.
     "source=hatch-${devcontainerId},target=/home/vscode/.local/share/hatch,type=volume",
     "source=history-${devcontainerId},target=/commandhistory,type=volume",
     "source=${localEnv:HOME}/.claude/hooks/peon-ping,target=/opt/peon-ping,type=bind,readonly"
@@ -104,9 +93,7 @@
   // remoteEnv is injected into each command the CLI runs, so a rotated token takes
   // effect in the next shell instead of needing the container recreated.
   //
-  // GH_TOKEN is expected to be a READ-ONLY token (see host-secrets.sh). Run
-  // `gh auth login` inside the container when you actually need to push; that
-  // credential then lives in the container's volume, not on the host.
+  // GH_TOKEN must be READ-ONLY -- see host-secrets.sh for why.
   "remoteEnv": {
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
     "GH_TOKEN": "${localEnv:GH_TOKEN}"

@@ -67,22 +67,13 @@ else
     # KeePassXC can be reached and the cause reported.
     cat >&2 <<'EOF'
 
-    ####################################################################
-    #  No Claude Code credentials in this container                    #
-    #                                                                  #
-    #  ANTHROPIC_API_KEY is empty and the config volume holds no login,#
-    #  so `claude` will start unauthenticated.                         #
-    #                                                                  #
-    #  Started with up.sh?  It should have failed before creating this #
-    #  container -- check that .devcontainer/host-secrets.sh ran.      #
-    #                                                                  #
-    #  Started from VS Code?  up.sh never runs, and remoteEnv resolves #
-    #  ${localEnv:...} against the VS Code process environment, so a   #
-    #  desktop-launched window has nothing to pass. Either launch      #
-    #  `code` from a shell that has the variables exported, or run     #
-    #  `claude` once in here and log in -- that login persists in the  #
-    #  volume across rebuilds.                                         #
-    ####################################################################
+    !! No Claude Code credentials: ANTHROPIC_API_KEY is empty and the config volume
+       holds no login, so `claude` will start unauthenticated.
+       Started with up.sh?      It should have failed first -- check host-secrets.sh.
+       Started from VS Code?    up.sh never runs, and a desktop-launched window has
+                                nothing to pass. Launch `code` from a shell with the
+                                variables exported, or run `claude` in here once and
+                                log in -- that login persists in the volume.
 
 EOF
 fi

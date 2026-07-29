@@ -1,4 +1,4 @@
-# Installed as /etc/gitconfig (system scope) by base/Dockerfile.
+# Installed as /etc/gitconfig (system scope) by the Dockerfile.
 #
 # System rather than ~/.gitconfig on purpose: VS Code's Dev Containers extension
 # copies the host ~/.gitconfig into the container when dev.containers.copyGitConfig

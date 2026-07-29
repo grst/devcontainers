@@ -2,25 +2,21 @@ name: publish
 
 # Builds and publishes everything a consumer repo pulls, in one run from one commit:
 #
-#   ghcr.io/grst/devcontainers/base              image
-#   ghcr.io/grst/devcontainers/python            image, built FROM base in this run
+#   ghcr.io/grst/devcontainers/python            image
 #   ghcr.io/grst/devcontainer-templates/python   Template artifact
 #
 # One workflow rather than two on different triggers, because the template's
 # devcontainer.json is what points at the image: publishing them separately is what let
-# them drift. A single job also gives ordering for free -- the images exist before the
-# template that references them.
+# them drift. A single job also gives ordering for free -- the image exists before the
+# template that references it.
 #
 # The two namespaces are deliberately different. A template with id `python` published
 # from this repo would otherwise land at ghcr.io/grst/devcontainers/python, exactly
-# where the python *image* lives, which is why the CLI is used with an explicit
-# --namespace instead of devcontainers/action.
+# where the image lives, which is why the CLI is used with an explicit --namespace
+# instead of devcontainers/action.
 
-# Publishing only -- no pull_request trigger. A PR build would have to hand the
-# freshly built base to the python build without a registry to put it in, and buildx's
-# docker-container driver cannot read the docker daemon's image store. test.yaml
-# already builds both images and validates the template sources on every PR, so PR
-# coverage is not lost by leaving it out here.
+# Publishing only -- no pull_request trigger. test.yaml builds the image and validates
+# the template sources on every PR, so PR coverage is not lost by leaving it out here.
 #
 # No `paths:` filter. Every merge to main publishes, so "whatever is on main is on the
 # registry" holds without having to reason about which paths a change touched -- and a
@@ -39,10 +35,6 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  # amd64 only for now. arm64 works (both pinned binaries have aarch64 assets and
-  # the Node tarball has arm64), but QEMU emulation makes `uv python install`
-  # painfully slow, so add it as a matrix entry when there is a reason to.
-  PLATFORMS: linux/amd64
 
 permissions:
   contents: read
@@ -58,8 +50,6 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Pushes only from main and tags. A pull request builds to verify the
-      # Dockerfiles still work but must not publish.
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
         with:
@@ -67,33 +57,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Metadata for base
-        id: meta-base
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/devcontainers/base
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-
-      - name: Build and push base
-        id: base
-        uses: docker/build-push-action@v6
-        with:
-          context: base
-          file: base/Dockerfile
-          platforms: ${{ env.PLATFORMS }}
-          push: true
-          tags: ${{ steps.meta-base.outputs.tags }}
-          labels: ${{ steps.meta-base.outputs.labels }}
-          cache-from: type=gha,scope=base
-          cache-to: type=gha,scope=base,mode=max
-
-      - name: Metadata for python
-        id: meta-python
+      - name: Image metadata
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/devcontainers/python
@@ -104,21 +69,17 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
 
-      # Pinned to the immutable digest of the base just pushed, not to :latest, so this
-      # run stays self-consistent even if another run publishes a new base meanwhile.
-      - name: Build and push python
+      # amd64 only, which is what the runner is, so `platforms:` is left at its
+      # default. The Dockerfile hardcodes the same assumption.
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: python
-          file: python/Dockerfile
-          platforms: ${{ env.PLATFORMS }}
           push: true
-          build-args: |
-            BASE_REF=${{ env.REGISTRY }}/${{ github.repository_owner }}/devcontainers/base@${{ steps.base.outputs.digest }}
-          tags: ${{ steps.meta-python.outputs.tags }}
-          labels: ${{ steps.meta-python.outputs.labels }}
-          cache-from: type=gha,scope=python
-          cache-to: type=gha,scope=python,mode=max
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # -------------------------------------------------------------------
       # Template artifacts

@@ -117,7 +117,7 @@ if [[ -r "$ALLOWLIST" ]]; then
         allow_mode["${path/#\~/$target_home}"]="$mode"
     done < "$ALLOWLIST"
 else
-    fail "${ALLOWLIST} is missing -- the base image is incomplete, cannot verify mounts"
+    fail "${ALLOWLIST} is missing -- the image is incomplete, cannot verify mounts"
 fi
 
 # Consumers with a legitimate extra mount declare it here, space-separated, as
