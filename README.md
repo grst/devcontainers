@@ -19,7 +19,7 @@ rust ships today.
 cd ~/projects/grst/some-repo
 
 devcontainer templates apply \
-  -t ghcr.io/grst/devcontainer-templates/python:1 \
+  -t ghcr.io/grst/devcontainer-templates/python:latest \
   -a '{"firewall":"on"}'
 
 .devcontainer/up.sh      # build/start under rootless podman, drop into zsh
@@ -126,8 +126,13 @@ There is no default anywhere, and the gate is implemented at two independent lay
 so that hand-editing the generated config cannot silently disable it.
 
 **Layer 1, the template.** `options.firewall` declares `enum: ["on", "off"]` with no
-`default`, so `devcontainer templates apply` cannot proceed without a value. The
-`templates` workflow asserts that no default ever gets added.
+`default`, so there is no value to fall back to and the VS Code template picker has to
+ask. CI asserts that no default ever gets added.
+
+Do not rely on layer 1 alone: a non-interactive `devcontainer templates apply` with the
+option omitted **does not refuse**. It substitutes an empty string and exits 0, leaving
+`"DEVCONTAINER_FIREWALL": ""` in the generated config — measured, and pinned by a test
+so a change in CLI behaviour shows up. That is exactly why layer 2 exists.
 
 **Layer 2, the runtime.** `devcontainer-firewall` runs as `postStartCommand`, and:
 
@@ -472,11 +477,48 @@ no `.mcp.json` in the template — MCP setup is documented rather than generated
 
 Registry namespaces are split on purpose. `devcontainers/action` would publish a
 template with id `python` to `ghcr.io/grst/devcontainers/python`, which is where the
-*image* lives, so the templates workflow uses the CLI's `--namespace` to put them
-under `ghcr.io/grst/devcontainer-templates/` instead.
+*image* lives, so the publish workflow uses the CLI's `--namespace` to put them under
+`ghcr.io/grst/devcontainer-templates/` instead.
 
 Every downloaded version is an `ARG`: `grep -rn '^ARG .*VERSION' base python` lists
 everything that needs bumping.
+
+## Publishing
+
+One workflow, `publish.yaml`, builds both images and the template in the same run from
+the same commit — because the template's `devcontainer.json` is what names the image,
+and publishing them on separate triggers is what let them drift.
+
+| Trigger | Images | Template |
+| --- | --- | --- |
+| push to `main` | `latest`, `sha-<short>` | `latest`, `0.0.0-main.g<short>` |
+| tag `v0.1.0` | `0.1.0`, `0.1`, `0`, `latest` | `0.1.0`, `0.1`, `0`, `latest` |
+
+The template's version comes from the ref, never from the repo: `version` in
+`devcontainer-template.json` is a `0.0.0` placeholder that the workflow overwrites. The
+`devcontainer` CLI derives its tags from that field and always pushes
+major / major.minor / version / latest, which is why a hardcoded `1.0.0` in the file
+meant every release re-published tag `1` and nothing else.
+
+A release also stamps `options.imageTag.default` to the version being released, so
+applying `…/python:0.1.0` pins you to the image built in that same run. The copy
+published from `main` keeps `latest`.
+
+Two consequences worth knowing:
+
+- **Pin to `latest` or to an exact `X.Y.Z`, not to a bare major.** Since main publishes
+  `0.0.0-main.…`, the `0` and `0.0` tags move with main and are not a stable release
+  line. That is the CLI's tag scheme, not a choice this repo makes.
+- The `g` in `0.0.0-main.g<short>` is required: semver forbids leading zeroes in a
+  numeric prerelease identifier, and a 7-character sha is all digits about 3.6% of the
+  time, so a bare sha would make the version invalid on a small fraction of commits.
+  The CLI does exit non-zero when it rejects a version, so this fails the run rather
+  than publishing nothing.
+
+Template *sources* are validated in `test.yaml` on every pull request — id matches the
+directory, every `${templateOption:…}` is declared, `options.firewall` still has no
+default, and the `.devcontainer/*.sh` scripts are mode `100755` (an exec bit lost there
+silently disabled secret fetching in every applied repo).
 
 ## Tests
 

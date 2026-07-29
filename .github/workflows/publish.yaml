@@ -1,32 +1,40 @@
-name: images
+name: publish
 
-# Builds and publishes the two images. python is built FROM base in the same run,
-# so a base change never leaves the two out of step in the registry.
+# Builds and publishes everything a consumer repo pulls, in one run from one commit:
 #
-#   ghcr.io/grst/devcontainers/base
-#   ghcr.io/grst/devcontainers/python
+#   ghcr.io/grst/devcontainers/base              image
+#   ghcr.io/grst/devcontainers/python            image, built FROM base in this run
+#   ghcr.io/grst/devcontainer-templates/python   Template artifact
 #
-# Note these are deliberately a different namespace from the Template artifacts
-# (ghcr.io/grst/devcontainer-templates/*), which would otherwise collide: a template
-# with id `python` published from this repo lands at ghcr.io/grst/devcontainers/python.
+# One workflow rather than two on different triggers, because the template's
+# devcontainer.json is what points at the image: publishing them separately is what let
+# them drift. A single job also gives ordering for free -- the images exist before the
+# template that references them.
+#
+# The two namespaces are deliberately different. A template with id `python` published
+# from this repo would otherwise land at ghcr.io/grst/devcontainers/python, exactly
+# where the python *image* lives, which is why the CLI is used with an explicit
+# --namespace instead of devcontainers/action.
 
 # Publishing only -- no pull_request trigger. A PR build would have to hand the
 # freshly built base to the python build without a registry to put it in, and buildx's
 # docker-container driver cannot read the docker daemon's image store. test.yaml
-# already builds both images on every PR (via a throwaway localhost registry), so PR
-# coverage of the Dockerfiles is not lost by leaving it out here.
+# already builds both images and validates the template sources on every PR, so PR
+# coverage is not lost by leaving it out here.
+#
+# No `paths:` filter. Every merge to main publishes, so "whatever is on main is on the
+# registry" holds without having to reason about which paths a change touched -- and a
+# doc-only merge is cheap, since the image layers come from the gha cache. The cost of a
+# filter is a main commit whose dev tag does not exist, which is exactly the kind of
+# thing you only discover while trying to use it.
 on:
   push:
     branches: [main]
     tags: ['v*']
-    paths:
-      - base/**
-      - python/**
-      - .github/workflows/images.yaml
   workflow_dispatch:
 
 concurrency:
-  group: images-${{ github.ref }}
+  group: publish-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -111,3 +119,41 @@ jobs:
           labels: ${{ steps.meta-python.outputs.labels }}
           cache-from: type=gha,scope=python
           cache-to: type=gha,scope=python,mode=max
+
+      # -------------------------------------------------------------------
+      # Template artifacts
+      # -------------------------------------------------------------------
+      # The version comes from the ref, never from a constant in the repo. The CLI
+      # derives the published tags from `version` in devcontainer-template.json and
+      # always pushes major / major.minor / version / latest, so a hardcoded 1.0.0
+      # republished tag `1` on every release no matter what was being released.
+      # Measured tag sets:
+      #
+      #   version 0.1.0            -> 0, 0.1, 0.1.0, latest
+      #   version 0.0.0-main.abc12 -> 0, 0.0, 0.0.0-main.abc12, latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - run: npm install -g @devcontainers/cli
+
+      # The same script test.yaml dry-runs against a throwaway registry on every pull
+      # request, so this step cannot break in a way a PR would not have caught.
+      - name: Stamp the template version from the ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: bash .github/scripts/stamp-templates.sh
+
+      - name: Publish templates
+        env:
+          # The CLI authenticates to ghcr from the docker config written by
+          # docker/login-action above; GITHUB_TOKEN covers the path where it asks for a
+          # token itself.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          devcontainer templates publish \
+            --registry ghcr.io \
+            --namespace "${{ github.repository_owner }}/devcontainer-templates" \
+            ./src

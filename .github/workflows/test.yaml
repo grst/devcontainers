@@ -199,10 +199,28 @@ jobs:
           fi
           echo 'ok: a mounted runtime socket fails the container'
 
-  shellcheck:
+  # Template sources, validated on every PR. This used to live in the publish workflow,
+  # which only ran on tags -- so a broken template was found at release time, or by a
+  # consumer, rather than in the pull request that broke it.
+  templates:
     runs-on: ubuntu-latest
+
+    # Publishing for real, to a throwaway registry, is the only way a pull request can
+    # cover the publish path: on the real registry it happens only after merge.
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
     steps:
       - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - run: npm install -g @devcontainers/cli
 
       # `devcontainer templates apply` copies these into a consumer repo with the mode
       # they have here. A missing exec bit on host-secrets.sh silently disabled secret
@@ -224,10 +242,112 @@ jobs:
           echo "checked ${n} template scripts"
           exit "$rc"
 
+      # Catch a malformed devcontainer-template.json or an option that no longer matches
+      # what devcontainer.json references. `version` is deliberately not checked: the
+      # publish workflow overwrites it from the ref, so whatever is in the file is a
+      # placeholder.
+      - name: Validate the template sources
+        run: |
+          for dir in src/*/; do
+            id="$(basename "$dir")"
+            echo "== ${id}"
+            jq -e --arg id "$id" '.id == $id' "${dir}devcontainer-template.json" >/dev/null \
+              || { echo "::error::${dir}devcontainer-template.json id must equal '${id}'"; exit 1; }
+
+            # Every ${templateOption:x} used in the template must be declared, and every
+            # declared option should be used -- an undeclared one is substituted with
+            # nothing and silently produces a broken config.
+            declared="$(jq -r '.options | keys[]' "${dir}devcontainer-template.json" | sort)"
+            used="$(grep -rhoE '\$\{templateOption:[A-Za-z0-9_]+\}' "$dir" \
+                     | sed -E 's/.*:([A-Za-z0-9_]+)\}/\1/' | sort -u)"
+            if [ -n "$(comm -13 <(echo "$declared") <(echo "$used"))" ]; then
+              echo "::error::${id}: undeclared options used: $(comm -13 <(echo "$declared") <(echo "$used") | tr '\n' ' ')"
+              exit 1
+            fi
+            if [ -n "$(comm -23 <(echo "$declared") <(echo "$used"))" ]; then
+              echo "::warning::${id}: declared but unused options: $(comm -23 <(echo "$declared") <(echo "$used") | tr '\n' ' ')"
+            fi
+
+            # The firewall option must have no default. That is the whole point of layer 1
+            # of the gate, and it is the kind of thing a well-meaning edit would "fix" by
+            # adding one.
+            if jq -e '.options.firewall | has("default")' "${dir}devcontainer-template.json" >/dev/null; then
+              echo "::error::${id}: options.firewall must NOT have a default; the choice is mandatory"
+              exit 1
+            fi
+          done
+
+      # Everything below exercises the path that otherwise only runs after a merge:
+      # stamp the version, publish, and apply the result the way a consumer does.
+      - name: Publish the templates to the throwaway registry
+        env:
+          REF_TYPE: branch
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/stamp-templates.sh
+          devcontainer templates publish --registry localhost:5000 --namespace dct ./src
+          # `latest` is what a consumer gets by default, so it has to be among the tags.
+          curl -sf http://localhost:5000/v2/dct/python/tags/list | tee /dev/stderr \
+            | jq -e '.tags | index("latest")' >/dev/null
+
+      - name: A consumer can apply it
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          git init -q .
+          devcontainer templates apply --workspace-folder . \
+            -t localhost:5000/dct/python:latest \
+            -a '{"firewall":"on"}'
+
+          for f in devcontainer.json up.sh host-secrets.sh post-create.sh; do
+            [ -f ".devcontainer/${f}" ] || { echo "::error::${f} missing after apply"; exit 1; }
+          done
+
+          # `templates apply` preserves the mode the file was published with, and an exec
+          # bit lost on host-secrets.sh silently disabled secret fetching in every applied
+          # repo. Assert it on the consumer side, where it is what actually matters.
+          for f in up.sh host-secrets.sh post-create.sh; do
+            [ -x ".devcontainer/${f}" ] || { echo "::error::.devcontainer/${f} is not executable after apply"; exit 1; }
+          done
+
+          if grep -rn '\${templateOption:' .devcontainer/; then
+            echo '::error::an unsubstituted templateOption survived apply'
+            exit 1
+          fi
+          grep -q '"DEVCONTAINER_FIREWALL": "on"' .devcontainer/devcontainer.json \
+            || { echo '::error::firewall=on did not reach containerEnv'; exit 1; }
+          echo 'ok: applied template is complete, substituted and executable'
+
+      # Pins what the CLI really does with a mandatory option, which is weaker than it
+      # looks: with -a omitted it does NOT refuse, it substitutes an empty string and
+      # exits 0. Enforcement is therefore layer 2 -- devcontainer-firewall rejecting an
+      # empty value, which the smoke job asserts. If the CLI ever starts filling in a
+      # value here, layer 2 would quietly stop being what enforces the choice.
+      - name: Omitting the firewall option leaves it empty rather than defaulted
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/consumer-noopt"
+          cd "$RUNNER_TEMP/consumer-noopt"
+          git init -q .
+          devcontainer templates apply --workspace-folder . \
+            -t localhost:5000/dct/python:latest
+          grep -q '"DEVCONTAINER_FIREWALL": ""' .devcontainer/devcontainer.json \
+            || { echo '::error::expected an empty DEVCONTAINER_FIREWALL; CLI behaviour changed'; exit 1; }
+          echo 'ok: unset option lands empty, and the runtime gate rejects that'
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
       - name: shellcheck
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck --severity=warning \
+            .github/scripts/stamp-templates.sh \
             base/bin/devcontainer-firewall \
             base/bin/devcontainer-isolation \
             base/bin/statusline.sh \

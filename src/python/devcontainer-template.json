@@ -1,6 +1,6 @@
 {
   "id": "python",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "name": "Python (uv) + Claude Code, hardened",
   "description": "Python dev container built on ghcr.io/grst/devcontainers/python: uv with Python 3.14, ruff, prek, Claude Code in auto mode, a mandatory egress-firewall choice, and an isolation check that keeps the workspace the only writable host path.",
   "documentationURL": "https://github.com/grst/devcontainers",
@@ -28,8 +28,8 @@
     },
     "imageTag": {
       "type": "string",
-      "description": "Tag of ghcr.io/grst/devcontainers/python to use.",
-      "proposals": ["latest", "1"],
+      "description": "Tag of ghcr.io/grst/devcontainers/python to use. A template published from a release tag defaults this to the matching image version, so applying that template pins you to the image built in the same run; the copy published from main defaults to 'latest'.",
+      "proposals": ["latest"],
       "default": "latest"
     }
   }
