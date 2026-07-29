@@ -116,7 +116,7 @@ if [ "${DEVCONTAINER_PEON:-off}" = 'on' ] && [ -x "${CLAUDE_PEON_DIR:-/nonexiste
 
     # The relay lives on the host's loopback, reachable via pasta's mapped address.
     # Without this fragment, firewall=on blocks the bridge.
-    echo '169.254.1.2   # peon-ping relay on the host loopback (via pasta map-host-loopback)' \
+    echo '169.254.1.1   # peon-ping relay on the host loopback (via pasta map-host-loopback)' \
         | sudo tee /etc/devcontainer/firewall-allowlist.d/10-peon.txt >/dev/null
 elif [ "${DEVCONTAINER_PEON:-off}" = 'on' ]; then
     echo '==> peonPing=on but /opt/peon-ping/peon.sh is not executable; skipping hooks'

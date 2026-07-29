@@ -279,18 +279,22 @@ jobs:
 
       # Everything below exercises the path that otherwise only runs after a merge:
       # stamp the version, publish, and apply the result the way a consumer does.
+      # The version published here is passed to the apply step below as an explicit tag.
+      # Not `latest`: the CLI only moves that onto the greatest version published, so a
+      # main build does not reliably get it, and a test that applied `:latest` would
+      # either fail or silently exercise some older artifact.
       - name: Publish the templates to the throwaway registry
+        id: publish
         env:
           REF_TYPE: branch
-          REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           bash .github/scripts/stamp-templates.sh
-          devcontainer templates publish --registry localhost:5000 --namespace dct ./src
-          # `latest` is what a consumer gets by default, so it has to be among the tags.
-          curl -sf http://localhost:5000/v2/dct/python/tags/list | tee /dev/stderr \
-            | jq -e '.tags | index("latest")' >/dev/null
+          devcontainer templates publish --registry localhost:5000 --namespace dct ./src \
+            | tee publish-summary.json
+          jq -e 'to_entries | length > 0' publish-summary.json >/dev/null
+          echo "version=$(jq -r '.python.version' publish-summary.json)" >> "$GITHUB_OUTPUT"
 
       - name: A consumer can apply it
         run: |
@@ -299,7 +303,7 @@ jobs:
           cd "$RUNNER_TEMP/consumer"
           git init -q .
           devcontainer templates apply --workspace-folder . \
-            -t localhost:5000/dct/python:latest \
+            -t localhost:5000/dct/python:${{ steps.publish.outputs.version }} \
             -a '{"firewall":"on"}'
 
           for f in devcontainer.json up.sh host-secrets.sh post-create.sh; do
@@ -333,7 +337,7 @@ jobs:
           cd "$RUNNER_TEMP/consumer-noopt"
           git init -q .
           devcontainer templates apply --workspace-folder . \
-            -t localhost:5000/dct/python:latest
+            -t localhost:5000/dct/python:${{ steps.publish.outputs.version }}
           grep -q '"DEVCONTAINER_FIREWALL": ""' .devcontainer/devcontainer.json \
             || { echo '::error::expected an empty DEVCONTAINER_FIREWALL; CLI behaviour changed'; exit 1; }
           echo 'ok: unset option lands empty, and the runtime gate rejects that'

@@ -19,16 +19,21 @@ rust ships today.
 cd ~/projects/grst/some-repo
 
 devcontainer templates apply \
-  -t ghcr.io/grst/devcontainer-templates/python:latest \
+  -t ghcr.io/grst/devcontainer-templates/python:0.0 \
   -a '{"firewall":"on"}'
 
 .devcontainer/up.sh      # build/start under rootless podman, drop into zsh
 claude                   # starts in auto mode; shift+tab reaches bypass
 ```
 
-`firewall` has no default and the apply fails without it — see
-[the firewall](#the-firewall-is-a-mandatory-choice). The other options
-(`pythonVersion`, `peonPing`, `imageTag`) all have sensible defaults.
+Template tags are explicit; `latest` is not reliable for these artifacts — `0.0` tracks
+the newest build of `main`, and a release is an exact `X.Y.Z`. See
+[publishing](#publishing).
+
+`firewall` has no default, and the container refuses to start until it is set — see
+[the firewall](#the-firewall-is-a-mandatory-choice). Note that a non-interactive apply
+does not itself refuse; it leaves the value empty and the runtime gate catches it. The
+other options (`pythonVersion`, `peonPing`, `imageTag`) all have sensible defaults.
 
 Re-applying the template over an existing `.devcontainer/` is how you upgrade a repo.
 `post-create.sh` is idempotent and safe to re-run by hand at any time, which is what
@@ -381,11 +386,19 @@ Enable with `-a '{"peonPing":"on"}'`. Three details make it work:
   `/.dockerenv` or `REMOTE_CONTAINERS`, podman writes `/run/.containerenv` instead, so
   it would otherwise think it is on a plain Linux host and try to play audio in the
   container.
-- `--network=pasta:--map-host-loopback,169.254.1.2` lets the container reach the relay
+- `--network=pasta:--map-host-loopback,169.254.1.1` lets the container reach the relay
   on the host's loopback, so the relay does not have to listen on `0.0.0.0` where the
   LAN could reach it. With `firewall=on`, `post-create.sh` adds that address to the
   allowlist; without `peonPing=on` it is not allowlisted and the host stays
   unreachable.
+
+  **The address must be `169.254.1.1`.** That is podman's own default for this mapping,
+  and podman substitutes it for a loopback nameserver when it writes the container's
+  `/etc/resolv.conf` — so a host resolving through systemd-resolved or a VPN hands the
+  container `nameserver 169.254.1.1`. This repo used `169.254.1.2` at first, which left
+  that nameserver pointing at nothing: no DNS at all, `claude` unable to reach the API,
+  `curl` failing on every hostname. It looks intermittent because it depends on whether
+  the host was using a loopback resolver when the container was created.
 
 Check the path end to end:
 
@@ -491,14 +504,28 @@ and publishing them on separate triggers is what let them drift.
 
 | Trigger | Images | Template |
 | --- | --- | --- |
-| push to `main` | `latest`, `sha-<short>` | `latest`, `0.0.0-main.g<short>` |
-| tag `v0.1.0` | `0.1.0`, `0.1`, `0`, `latest` | `0.1.0`, `0.1`, `0`, `latest` |
+| push to `main` | `latest`, `sha-<short>` | `0.0.0-main.g<short>`, `0.0`, `0` |
+| tag `v0.1.0` | `0.1.0`, `0.1`, `0`, `latest` | `0.1.0`, `0.1`, `0`, and `latest` if it is the greatest version published |
+
+**Pin an explicit template tag; do not rely on `latest`.** The `devcontainer` CLI decides
+that tag itself, and only moves it onto the greatest version already published — so a
+main build, which is a prerelease below every release, usually will not get it. The first
+main publish produced `0`, `0.0`, `0.0.0-main.g<sha>` and no `latest` at all, which is
+worth knowing before wondering why `apply -t …:latest` fails. Each publish prints exactly
+what it pushed:
+
+```
+{"python":{"publishedTags":["0","0.0","0.0.0-main.g60947ed"],"version":"0.0.0-main.g60947ed"}}
+```
+
+`0.0` is a usable short handle for the newest main build, since main builds are the only
+thing publishing `0.0.x` versions — until an actual `v0.0.x` release exists.
 
 The template's version comes from the ref, never from the repo: `version` in
 `devcontainer-template.json` is a `0.0.0` placeholder that the workflow overwrites. The
-`devcontainer` CLI derives its tags from that field and always pushes
-major / major.minor / version / latest, which is why a hardcoded `1.0.0` in the file
-meant every release re-published tag `1` and nothing else.
+CLI derives its tags from that field and always pushes major / major.minor / version,
+which is why a hardcoded `1.0.0` in the file meant every release re-published tag `1` and
+nothing else.
 
 A release also stamps `options.imageTag.default` to the version being released, so
 applying `…/python:0.1.0` pins you to the image built in that same run. The copy
@@ -506,9 +533,10 @@ published from `main` keeps `latest`.
 
 Two consequences worth knowing:
 
-- **Pin to `latest` or to an exact `X.Y.Z`, not to a bare major.** Since main publishes
-  `0.0.0-main.…`, the `0` and `0.0` tags move with main and are not a stable release
-  line. That is the CLI's tag scheme, not a choice this repo makes.
+- **A bare major is not a release line.** Since main publishes `0.0.0-main.…`, the `0`
+  tag moves with main as well as with `0.x` releases. Pin an exact `X.Y.Z` for a release,
+  or the `0.0.0-main.g<sha>` of the build you want. That is the CLI's tag scheme, not a
+  choice this repo makes.
 - The `g` in `0.0.0-main.g<short>` is required: semver forbids leading zeroes in a
   numeric prerelease identifier, and a 7-character sha is all digits about 3.6% of the
   time, so a bare sha would make the version invalid on a small fraction of commits.

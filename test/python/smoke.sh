@@ -175,7 +175,27 @@ case "$fw_state" in
         done
         ;;
     off)
-        skip 'egress checks (firewall is off by configuration)'
+        # Not a skip. "firewall off" means unrestricted egress, so the interesting
+        # assertion is that egress actually *works* -- and nothing here used to check
+        # that, so a container with no working DNS at all passed every check while
+        # `claude` could not reach the API and curl failed on every hostname.
+        #
+        # DNS is checked separately from TCP because the two failures look identical
+        # from curl but have nothing to do with each other: a black-holed nameserver
+        # (the pasta map-host-loopback address not matching what podman wrote into
+        # resolv.conf) versus no route at all.
+        if getent hosts api.anthropic.com >/dev/null 2>&1; then
+            ok 'DNS resolves (api.anthropic.com)'
+        else
+            bad "DNS does not resolve. nameservers: $(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf)"
+        fi
+        for host in https://api.anthropic.com https://example.com; do
+            if curl -sS -I --max-time 10 -o /dev/null "$host" 2>/dev/null; then
+                ok "${host} is reachable (egress is unrestricted)"
+            else
+                bad "${host} is NOT reachable, but the firewall is off -- egress is broken"
+            fi
+        done
         ;;
     *)
         bad "firewall.state is '${fw_state}'; postStartCommand did not run"

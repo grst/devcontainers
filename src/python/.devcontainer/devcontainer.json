@@ -28,7 +28,14 @@
     "--security-opt=label=disable",
     "--cap-add=NET_ADMIN",
     "--cap-add=NET_RAW",
-    "--network=pasta:--map-host-loopback,169.254.1.2"
+    // 169.254.1.1 specifically, which is podman's own default for this mapping -- do not
+    // "tidy" it to another link-local address. When the host resolves through a stub
+    // resolver on loopback (systemd-resolved, a VPN), podman writes 169.254.1.1 into the
+    // container's /etc/resolv.conf in its place. Pointing the mapping somewhere else
+    // leaves that nameserver aimed at nothing, and the container has no working DNS at
+    // all: `claude` cannot reach the API and curl fails on every name. It only shows up
+    // when the host happens to be using a loopback resolver, so it looks intermittent.
+    "--network=pasta:--map-host-loopback,169.254.1.1"
   ],
 
   "containerUser": "vscode",

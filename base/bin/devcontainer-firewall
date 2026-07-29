@@ -78,6 +78,35 @@ write_state() { echo "$1" > "${STATE_DIR}/firewall.state"; chmod 0644 "${STATE_D
 if [[ "${DEVCONTAINER_FIREWALL}" == 'off' ]]; then
     write_state off
     note 'egress is UNRESTRICTED (DEVCONTAINER_FIREWALL=off)'
+
+    # "Unrestricted" is worth confirming rather than assuming. A container whose DNS
+    # points at a black hole behaves exactly like one that is working until an agent
+    # tries to use the network, and then the failure surfaces as Claude Code being
+    # unable to reach the API -- nowhere near the cause. Resolution and transport are
+    # reported separately because curl cannot tell them apart.
+    #
+    # Deliberately not fatal: working offline is legitimate, and refusing to start a
+    # container because a laptop is on a plane would be worse than the warning.
+    if ! getent hosts api.anthropic.com >/dev/null 2>&1; then
+        cat >&2 <<EOF
+
+  !! DNS is not working in this container.
+     nameservers: $(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+     If a nameserver above is 169.254.x.x, it is pasta's mapped host loopback and the
+     mapping must point at the same address: check that runArgs has
+     --network=pasta:--map-host-loopback,169.254.1.1 and not another address.
+     Nothing that resolves a hostname will work until this is fixed.
+
+EOF
+    elif ! curl -sS -I --max-time 8 -o /dev/null https://api.anthropic.com 2>/dev/null; then
+        cat >&2 <<EOF
+
+  !! DNS resolves but https://api.anthropic.com is unreachable, with no firewall in the
+     way. Default route: $(ip route show default 2>/dev/null | head -1)
+     Claude Code will not be able to reach the API.
+
+EOF
+    fi
     exit 0
 fi
 

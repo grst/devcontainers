@@ -146,6 +146,10 @@ jobs:
           SHA: ${{ github.sha }}
         run: bash .github/scripts/stamp-templates.sh
 
+      # The tags are whatever the CLI derives from the version, and `latest` is left to
+      # it: it only moves `latest` onto the greatest version published, so a main build
+      # (a prerelease, below every release) usually will not get it. Pin an explicit tag
+      # when applying -- the summary printed here lists exactly what was published.
       - name: Publish templates
         env:
           # The CLI authenticates to ghcr from the docker config written by
