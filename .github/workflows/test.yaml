@@ -33,7 +33,7 @@ jobs:
         run: sudo chown -R 1000:1000 test/python
 
       # load: true, because everything below runs it with `docker run`.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: python
           load: true
