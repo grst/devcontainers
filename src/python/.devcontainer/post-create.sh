@@ -87,6 +87,16 @@ else
     echo '    No GH_TOKEN; gh is unauthenticated (60 req/hour, public repos only)'
 fi
 
+# Copilot CLI has no host-side secret: its login is made with `copilot login` in
+# here and lives on its own config volume. The read-only GH_TOKEN above would
+# otherwise take precedence over that login and fail, which is why the zsh config
+# wraps `copilot` to drop it.
+if [ -n "${COPILOT_GITHUB_TOKEN:-}" ]; then
+    echo '    COPILOT_GITHUB_TOKEN present; copilot prefers it over any stored login'
+else
+    echo '    copilot: run `copilot login` here once; it persists in the config volume'
+fi
+
 # ---------------------------------------------------------------------------
 # peon-ping
 # ---------------------------------------------------------------------------

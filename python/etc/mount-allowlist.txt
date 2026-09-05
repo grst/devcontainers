@@ -22,6 +22,7 @@
 
 # Named volumes for state that must survive a rebuild.
 ~/.claude                     rw
+~/.copilot                    rw
 ~/.cache                      rw
 ~/.local/share/uv             rw
 /commandhistory               rw

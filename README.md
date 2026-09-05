@@ -6,7 +6,7 @@ for being equally usable from a terminal and from VS Code.
 
 | | |
 | --- | --- |
-| `ghcr.io/grst/devcontainers/python` | zsh + dotfiles, CLI tools, Claude Code, the firewall and isolation checks, uv + hatch, Python 3.14, ruff, prek, headless Chrome. |
+| `ghcr.io/grst/devcontainers/python` | zsh + dotfiles, CLI tools, Claude Code, GitHub Copilot CLI, the firewall and isolation checks, uv + hatch, Python 3.14, ruff, prek, headless Chrome. |
 | `ghcr.io/grst/devcontainer-templates/python` | the devcontainer Template that generates a repo's `.devcontainer/`. |
 
 Every "why" in this repo lives once, at the code it explains. This file covers usage
@@ -162,6 +162,26 @@ prompting, and in headless `claude -p` runs repeated blocks abort the session.
 The status line (context usage, session tokens, elapsed time, rate limits, cost) lives
 at `/usr/local/share/devcontainer/statusline.sh` in the image, so there is one copy to
 maintain rather than one vendored per repo.
+
+## GitHub Copilot CLI
+
+`copilot` is in the image next to `claude`, pinned in `python/Dockerfile` like every
+other download and free to update itself inside a running container.
+
+**It authenticates on its own.** Run `copilot login` once in the container; the login
+lands in `$HOME/.copilot`, which is a named volume, so it survives a rebuild the way a
+Claude Code login does. There is no host-side secret for it — the `GH_TOKEN` that
+arrives from KeePassXC is read-only by design and cannot reach the Copilot API.
+
+That last point has a sharp edge: `GH_TOKEN` and `GITHUB_TOKEN` take precedence over a
+stored login, so the read-only token would break `copilot` even after a successful
+`copilot login`. The container's `copilot()` shell function drops both for the call.
+Export `COPILOT_GITHUB_TOKEN` if you would rather a token won.
+
+With the firewall on, `api.githubcopilot.com` is in the base allowlist and
+`+github-meta` now also expands GitHub's published `copilot` ranges — the endpoint sits
+behind a rotating pool, so those ranges are what actually keep it reachable, and they
+cover the feature-flag endpoint too.
 
 ## Secrets: KeePassXC on the host, environment variables into the container
 

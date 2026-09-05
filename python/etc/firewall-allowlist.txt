@@ -37,6 +37,19 @@ codeload.github.com
 objects.githubusercontent.com
 raw.githubusercontent.com
 
+# --- GitHub Copilot CLI ----------------------------------------------------
+# Inference, auth and the CLI's own login exchange. Like the GitHub hosts above it
+# sits behind a rotating pool, so the +github-meta expansion above is what actually
+# keeps it reachable -- it now includes the published `copilot` ranges, which are
+# Azure addresses that appear under no other key.
+api.githubcopilot.com
+# default.exp-tas.com, the CLI's feature-flag endpoint, is deliberately absent even
+# though GitHub publishes it as a Copilot domain: it is a CNAME into e-msedge.net,
+# whose address (13.107.5.93) is already one of those `copilot` ranges. Listing the
+# name on top of that only helps if the resolver answers it at all -- one that
+# blackholes e-msedge.net returns 0.0.0.0, and allowlisting 0.0.0.0 is worse than
+# listing nothing.
+
 # --- Python ----------------------------------------------------------------
 pypi.org
 files.pythonhosted.org
