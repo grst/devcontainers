@@ -12,7 +12,7 @@
 
 # Ubuntu 26.04 LTS "Resolute Raccoon". Pinned to a release tag rather than the
 # floating :resolute so a rebuild is reproducible.
-FROM mcr.microsoft.com/devcontainers/base:3.0.3-resolute
+FROM mcr.microsoft.com/devcontainers/base:3.0.7-resolute
 
 ARG USERNAME=vscode
 ARG TZ=Europe/Berlin
