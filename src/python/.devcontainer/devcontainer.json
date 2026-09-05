@@ -49,9 +49,12 @@
   // against /etc/devcontainer/mount-allowlist.txt on every start.
   //
   // ${devcontainerId} keys the volumes to this repo automatically, so nothing has
-  // to be renamed per project and two repos never share a Claude login or cache.
+  // to be renamed per project and two repos never share an agent login or cache.
   "mounts": [
     "source=claude-config-${devcontainerId},target=/home/vscode/.claude,type=volume",
+    // Copilot CLI's own login and state ($COPILOT_HOME), so `copilot login`
+    // survives a rebuild the same way a Claude Code login does.
+    "source=copilot-config-${devcontainerId},target=/home/vscode/.copilot,type=volume",
     "source=cache-${devcontainerId},target=/home/vscode/.cache,type=volume",
     "source=uv-${devcontainerId},target=/home/vscode/.local/share/uv,type=volume",
     "source=hatch-${devcontainerId},target=/home/vscode/.local/share/hatch,type=volume",

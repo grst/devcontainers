@@ -8,9 +8,11 @@ updates:
       default-days: 7
 
   # Keeps the FROM line current. The pinned tool versions in the Dockerfile
-  # (YQ_VERSION, RGA_VERSION, NODE_VERSION, UV_VERSION) are plain ARGs that
-  # dependabot does not track -- `grep -n '^ARG .*VERSION' python/Dockerfile`
-  # lists all of them for a manual bump.
+  # (YQ_VERSION, RGA_VERSION, NODE_VERSION, UV_VERSION, CLAUDE_CODE_VERSION,
+  # COPILOT_CLI_VERSION) are plain ARGs that dependabot does not track --
+  # `grep -n '^ARG .*VERSION' python/Dockerfile` lists all of them for a manual
+  # bump. The two agent CLIs also update themselves inside a running container,
+  # so a bump there only moves what a fresh container starts from.
   - package-ecosystem: docker
     directory: /python
     schedule:

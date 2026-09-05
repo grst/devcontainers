@@ -236,11 +236,13 @@ note "resolved ${resolved}/${#domains[@]} domains"
 if [[ "$want_github_meta" == true ]]; then
     # GitHub's named hosts sit behind large rotating pools, so a resolved address
     # goes stale within minutes; these are the ranges that actually back them.
+    # `copilot` is in the selection because api.githubcopilot.com is served from
+    # Azure addresses that are published there and nowhere else.
     if meta="$(curl -fsSL --max-time 10 https://api.github.com/meta 2>/dev/null)"; then
         while read -r cidr; do
             [[ -z "$cidr" ]] && continue
             if [[ "$cidr" == *:* ]]; then add6 "$cidr"; else add4 "$cidr"; fi
-        done < <(jq -r '[.web[]?, .api[]?, .git[]?, .packages[]?] | .[]' <<< "$meta")
+        done < <(jq -r '[.web[]?, .api[]?, .git[]?, .packages[]?, .copilot[]?] | .[]' <<< "$meta")
         note 'added GitHub published ranges from api.github.com/meta'
     else
         note 'WARNING: could not fetch api.github.com/meta; GitHub access may be partial'

@@ -128,6 +128,24 @@ claude() {
 }
 
 # ---------------------------------------------------------------------------
+# GitHub Copilot CLI
+# ---------------------------------------------------------------------------
+# GH_TOKEN and GITHUB_TOKEN take precedence over the CLI's own stored login, and
+# the GH_TOKEN this container receives is read-only by design -- it cannot reach
+# the Copilot API, so leaving it in the environment turns a perfectly good
+# `copilot login` into an authentication failure. Drop the two for this call only.
+# Export COPILOT_GITHUB_TOKEN if you do want a token to win instead.
+#
+# `env` resolves copilot from PATH, so this does not recurse.
+copilot() {
+    if [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]]; then
+        command copilot "$@"
+    else
+        env -u GH_TOKEN -u GITHUB_TOKEN copilot "$@"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
 # A container shell must never be mistaken for a host shell, so the prompt leads

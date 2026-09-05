@@ -27,7 +27,7 @@ check() { # check <description> <command...>
 echo
 echo '== tools on PATH =='
 for tool in zsh git gh jq yq fzf fd rg rga bat delta mlr tree nvim tmux direnv \
-            node npm claude ipset iptables dig \
+            node npm claude copilot ipset iptables dig \
             uv uvx python ruff prek pre-commit hatch ipython zizmor cruft chromium; do
     check "$tool" command -v "$tool"
 done

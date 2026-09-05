@@ -128,7 +128,7 @@ RUN mkdir -p /etc/apt/keyrings \
     && gh --version
 
 # ---------------------------------------------------------------------------
-# Node and Claude Code
+# Node, Claude Code and GitHub Copilot CLI
 # ---------------------------------------------------------------------------
 # From the official tarball rather than the node devcontainer feature: the feature
 # would run on every container create in every consuming repo, while this is a
@@ -141,12 +141,22 @@ RUN set -eux; \
     node --version; \
     npm --version
 
-# Claude Code keeps itself up to date inside the container, so this only has to be
-# recent enough to bootstrap. Pin it and set DISABLE_AUTOUPDATER=1 in containerEnv
-# if you need reproducible agent behaviour instead.
-RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code \
+# Both agent CLIs are pinned, like every other download in this file, so a rebuild
+# is reproducible and a bump is visible in the diff. Each also keeps itself up to
+# date inside the container, so the pin only has to be recent enough to bootstrap;
+# set DISABLE_AUTOUPDATER=1 (Claude Code) and COPILOT_AUTO_UPDATE=false (Copilot
+# CLI) in containerEnv if you need the pinned versions to stay put instead.
+#
+# Copilot CLI resolves a platform-specific package (copilot-linux-x64) as an
+# optional dependency, which is another reason this image is amd64 only.
+ARG CLAUDE_CODE_VERSION=2.1.261
+ARG COPILOT_CLI_VERSION=1.0.83
+RUN npm install -g --no-fund --no-audit \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "@github/copilot@${COPILOT_CLI_VERSION}" \
     && npm cache clean --force \
-    && claude --version
+    && claude --version \
+    && copilot --version
 
 # ---------------------------------------------------------------------------
 # uv
@@ -331,6 +341,7 @@ RUN printf '%s\n' \
 # cannot write to them.
 RUN mkdir -p \
         "/home/${USERNAME}/.claude" \
+        "/home/${USERNAME}/.copilot" \
         "/home/${USERNAME}/.cache" \
         "/home/${USERNAME}/.local/share/uv" \
         "/home/${USERNAME}/.local/share/hatch" \
@@ -339,6 +350,7 @@ RUN mkdir -p \
     && touch /commandhistory/.zsh_history /commandhistory/.bash_history \
     && chown -R "${USERNAME}:${USERNAME}" \
         "/home/${USERNAME}/.claude" \
+        "/home/${USERNAME}/.copilot" \
         "/home/${USERNAME}/.cache" \
         "/home/${USERNAME}/.local" \
         /commandhistory \
