@@ -49,11 +49,21 @@ fail() { failures+=("$1"); }
 # This one matters more than everything else combined. With a runtime socket the
 # agent can start a privileged container and write anywhere on the host, which
 # defeats guarantee 1 no matter how careful the rest of the mounts are.
+#
+# What is looked for is a socket that came from *outside*, which means it is a bind
+# mount or sits inside one -- so findmnt reports a mount other than the container's
+# own root filesystem for it. The distinction exists because the image now ships
+# rootless podman: a `sudo podman system service` in an earlier session leaves a
+# socket at /run/podman/podman.sock on the container's own filesystem, which reaches
+# the container's own runtime and nothing else, and flagging that would fail every
+# later start with an escape warning about the container's own doing. Any real
+# host socket is still caught here, and caught a second time by the mount scan
+# below, which does not special-case anything.
 for sock in /var/run/docker.sock /run/docker.sock \
             /var/run/podman/podman.sock /run/podman/podman.sock; do
-    if [[ -S "$sock" ]]; then
-        fail "container runtime socket is mounted at ${sock} -- an agent can use it to start a privileged container and write anywhere on the host"
-    fi
+    [[ -S "$sock" ]] || continue
+    [[ "$(findmnt -nro TARGET --target "$sock" 2>/dev/null)" == '/' ]] && continue
+    fail "container runtime socket is mounted at ${sock} -- an agent can use it to start a privileged container and write anywhere on the host"
 done
 
 # ---------------------------------------------------------------------------

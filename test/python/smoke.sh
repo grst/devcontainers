@@ -20,14 +20,24 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$(( fail + 1 )); }
 skip() { printf '  \033[33mskip\033[0m  %s\n' "$1"; }
 
 check() { # check <description> <command...>
-    local desc="$1"; shift
-    if "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi
+    local desc="$1" out why; shift
+    if out="$("$@" 2>&1)"; then
+        ok "$desc"
+    else
+        # The last line of output, when there is one. A check that fails without
+        # saying why sends you off to run the command by hand, which is what this
+        # file exists to save you -- and podman in particular reports one-line
+        # errors that name exactly what it could not do.
+        why="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)"
+        bad "${desc}${why:+ -- ${why}}"
+    fi
 }
 
 echo
 echo '== tools on PATH =='
 for tool in zsh git gh jq yq fzf fd rg rga bat delta mlr tree nvim tmux direnv \
             node npm claude copilot ipset iptables dig \
+            podman crun fuse-overlayfs pasta newuidmap \
             uv uvx python ruff prek pre-commit hatch ipython zizmor cruft chromium; do
     check "$tool" command -v "$tool"
 done
@@ -117,6 +127,51 @@ else
     skip '/opt/peon-ping is not mounted'
 fi
 
+# Is the outer container rootless? An identity uid_map means a rootful runtime --
+# docker, which is what CI has -- and several things below are then either
+# meaningless or outright impossible. Asked once here, used again by the nested
+# container checks further down.
+outer_rootless=true
+grep -qE '^[[:space:]]*0[[:space:]]+0[[:space:]]+4294967295' /proc/self/uid_map \
+    && outer_rootless=false
+
+# The two things CAP_SYS_ADMIN and unmask=/proc/* would cost if the reasoning in
+# devcontainer.json were wrong. Both are probed as root, because as the container
+# user they would fail for a boring lack of privilege and prove nothing.
+#
+# Only meaningful in a rootless container: in a rootful one CAP_SYS_ADMIN really is
+# host-level privilege and a remount really does succeed. Skipping there is the
+# honest result, not a pass.
+if [ "$outer_rootless" = false ]; then
+    skip 'CAP_SYS_ADMIN containment (rootful runtime; not how this image is run)'
+else
+    ro_mount="$(awk '$0 ~ / - / {
+                       opts = $6; tgt = $5;
+                       fstype = $0; sub(/.* - /, "", fstype); sub(/ .*/, "", fstype)
+                       if (opts ~ /(^|,)ro(,|$)/ && fstype !~ /^(proc|sysfs|tmpfs|devpts|mqueue|cgroup2?|bpf|nsfs|devtmpfs|securityfs|tracefs|debugfs|fusectl|pstore|configfs|binfmt_misc|efivarfs)$/ && tgt !~ /^\/(proc|sys|dev)(\/|$)/) { print tgt; exit }
+                   }' /proc/self/mountinfo)"
+    if [ -n "$ro_mount" ]; then
+        if sudo mount -o remount,rw "$ro_mount" 2>/dev/null; then
+            sudo mount -o remount,ro "$ro_mount" 2>/dev/null
+            bad "a read-only mount (${ro_mount}) could be remounted rw -- the kernel is not locking inherited mounts, so ro host binds are not actually ro"
+        else
+            ok "a read-only mount (${ro_mount}) cannot be remounted rw even as root"
+        fi
+    else
+        skip 'ro-remount probe (no read-only host mount in this container)'
+    fi
+
+    # A non-namespaced sysctl: writable only with privilege in the host's user
+    # namespace, which this container does not have however root it looks inside.
+    # drop_caches is the harmless one to pick -- if the write ever did land, the
+    # host loses some page cache and nothing else.
+    if echo 1 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1; then
+        bad 'a non-namespaced host sysctl (vm.drop_caches) was writable -- this container has more than a rootless user namespace'
+    else
+        ok 'non-namespaced host sysctls stay unwritable (vm.drop_caches)'
+    fi
+fi
+
 echo
 echo '== firewall gate =='
 # The gate must refuse an unset or bogus value. This is the check that keeps
@@ -179,6 +234,159 @@ case "$fw_state" in
         bad "firewall.state is '${fw_state}'; postStartCommand did not run"
         ;;
 esac
+
+echo
+echo '== nested containers (podman) =='
+# Rootless podman inside a rootless container has four prerequisites from the
+# runtime, and podman names none of them when they are missing -- it reports a
+# newuidmap EPERM, or a tap device it could not open. So each is checked on its
+# own here, and the failure message says which runArg to put back. (podman and the
+# helpers it needs are in the tools list above.)
+check '/dev/net/tun is passed through (pasta needs a tap device)' test -c /dev/net/tun
+check '/dev/fuse is passed through (fuse-overlayfs storage fallback)' test -c /dev/fuse
+
+# CAP_SYS_ADMIN, and it has to be *effective* rather than merely in the bounding
+# set. Two different things want it for real: newuidmap, which is setuid-root and so
+# picks it out of the bounding set, and then pasta and crun, which each pivot_root
+# into a fresh mount namespace and get `Operation not permitted` without the
+# capability in hand.
+#
+# That distinction is the whole reason the nested path cannot be exercised under
+# docker: podman raises --cap-add into the *ambient* set for a non-root container
+# user, so the capability is effective, while docker leaves it in the bounding set
+# only. Read from /proc rather than with capsh, which is a package this image does
+# not otherwise need; bit 21 is CAP_SYS_ADMIN.
+sys_admin=none
+(( 0x$(awk '/^CapBnd:/ {print $2}' /proc/self/status) & (1 << 21) )) && sys_admin=bounding
+(( 0x$(awk '/^CapEff:/ {print $2}' /proc/self/status) & (1 << 21) )) && sys_admin=effective
+case "$sys_admin" in
+    effective)
+        ok 'CAP_SYS_ADMIN is effective (newuidmap, and pasta/crun pivot_root, all need it)'
+        ;;
+    bounding)
+        if [ "$outer_rootless" = true ]; then
+            bad 'CAP_SYS_ADMIN is in the bounding set but not effective -- podman makes --cap-add ambient for the container user, so something has un-done that'
+        else
+            skip 'CAP_SYS_ADMIN is bounding-only (a rootful runtime grants a non-root user no ambient capability)'
+        fi
+        ;;
+    none)
+        bad 'CAP_SYS_ADMIN is missing -- add "--cap-add=SYS_ADMIN" to runArgs, or podman fails with `newuidmap: write to uid_map failed`'
+        ;;
+esac
+
+# A nested container has to mount a fresh procfs, and the kernel refuses while any
+# locked submount under /proc would be hidden by it -- which is exactly what
+# podman's masked and read-only /proc paths are.
+masked_proc="$(awk '$5 ~ /^\/proc\// {printf "%s ", $5}' /proc/self/mountinfo)"
+if [ -z "$masked_proc" ]; then
+    ok 'nothing is mounted under /proc (a nested container can mount procfs)'
+else
+    bad "masked submounts under /proc (${masked_proc}) -- add \"--security-opt=unmask=/proc/*\" to runArgs, or every \`podman run\` fails with \`mount 'proc' to 'proc': Operation not permitted\`"
+fi
+
+# The nested subuid range must consist of ids the *outer* user namespace actually
+# maps, and must not contain the container user's own uid. The image ships ranges
+# that fit --userns=keep-id; this catches a base-image default coming back, or a
+# host with a smaller subuid range than the usual 65536.
+outer_max="$(awk '{ last = $1 + $3 - 1; if (last > max) max = last } END { print max + 0 }' /proc/self/uid_map)"
+self_uid="$(id -u)"
+subuid_problem=''
+while IFS=: read -r user start count; do
+    [ "$user" = "$(id -un)" ] || continue
+    [ -n "$count" ] || continue
+    if (( start + count - 1 > outer_max )); then
+        subuid_problem="${start}:${count} reaches id $(( start + count - 1 )), but the outer user namespace only maps up to ${outer_max}"
+    elif (( self_uid >= start && self_uid < start + count )); then
+        subuid_problem="${start}:${count} contains the container user's own uid ${self_uid}"
+    fi
+done < /etc/subuid
+if [ -z "$subuid_problem" ]; then
+    ok "/etc/subuid fits the outer user namespace (ids 0-${outer_max})"
+else
+    bad "/etc/subuid: ${subuid_problem} -- newuidmap will fail with EPERM"
+fi
+
+# And the thing all of the above exists for.
+if podman info >/dev/null 2>&1; then
+    ok 'podman info (user namespace, storage and runtime all resolve)'
+
+    # Everything past here needs an image, which needs egress to a registry. A pull
+    # that cannot reach one is a skip, not a failure: the checks below are about
+    # nested containers working, and this file is meant to run offline too.
+    nested_image='docker.io/library/alpine:3.22'
+    if [ "$sys_admin" != effective ]; then
+        # Everything up to here -- storage, the user namespace, newuidmap, the subuid
+        # arithmetic -- has been exercised. Starting a container cannot be: pasta fails
+        # with `Failed to pivot_root() into empty tmpfs: Operation not permitted`, and
+        # so does crun even with --network=host. This is the one part that needs a
+        # rootless outer container, and the README says where it is exercised instead.
+        skip 'nested run, build and egress (pivot_root needs CAP_SYS_ADMIN effective, so a rootless outer container)'
+    elif podman pull -q "$nested_image" >/dev/null 2>&1; then
+        # Reported in full, and with a follow-up probe, rather than as one line:
+        # when this fails it is the *outer* runtime's doing -- a MAC profile, a
+        # seccomp filter, a missing device -- and the useful sentence is rarely the
+        # last one. pasta, for one, says what it could not do and then exits with
+        # `Failed to sandbox process`, which names nothing.
+        if nested_out="$(podman run --rm "$nested_image" true 2>&1)"; then
+            ok 'podman run in a nested container'
+        else
+            bad 'podman run in a nested container'
+            printf '%s\n' "$nested_out" | sed 's/^/          | /'
+            # Splits the two halves apart: --network=host skips pasta entirely, so if
+            # this works the nested *container* is fine and only its network is not.
+            if podman run --rm --network=host "$nested_image" true >/dev/null 2>&1; then
+                printf '          | (--network=host works, so it is the nested network, not the container)\n'
+            fi
+        fi
+        # Runs as a uid other than the container user's, which is the half of the
+        # mapping that only works because /etc/subuid is right.
+        check 'a nested container can run as another uid' \
+            podman run --rm --user 405:100 "$nested_image" true
+        # `podman build` takes a different path to the same namespaces (buildah,
+        # mounting the build container's /proc), and it is the one an agent reaches
+        # for most.
+        build_dir="$(mktemp -d)"
+        printf 'FROM %s\nRUN echo built > /probe\n' "$nested_image" > "${build_dir}/Dockerfile"
+        check 'podman build' podman build -q -t smoke-nested:1 "$build_dir"
+        rm -rf "$build_dir"
+        podman rmi -f smoke-nested:1 >/dev/null 2>&1
+
+        # The one that matters for the firewall's promise: pasta forwards the nested
+        # container's traffic through sockets in *this* container's network
+        # namespace, so the allowlist applies to it too. If it did not, a nested
+        # container would be a one-command way around firewall=on.
+        if [ "$fw_state" = on ]; then
+            if podman run --rm "$nested_image" \
+                wget -qO /dev/null -T 8 https://example.com >/dev/null 2>&1
+            then
+                bad 'a nested container reached a non-allowlisted host -- nested containers bypass the firewall'
+            else
+                ok 'a nested container is subject to the egress allowlist too'
+            fi
+            # pypi.org, not pypi.org/simple/ -- busybox wget has no HEAD, and the
+            # full index is 44 MB, so a GET there times out and reads as blocked.
+            if podman run --rm "$nested_image" \
+                wget -qO /dev/null -T 8 https://pypi.org/ >/dev/null 2>&1
+            then
+                ok 'a nested container can reach an allowlisted host'
+            else
+                bad 'a nested container cannot reach pypi.org, which is allowlisted'
+            fi
+        else
+            skip 'nested egress under the allowlist (firewall is off)'
+        fi
+    else
+        skip "nested run/build (could not pull ${nested_image}; needs egress to a registry)"
+    fi
+else
+    # A denied mount here, with CAP_SYS_ADMIN present, is almost always a mandatory
+    # access control profile on the *outer* container rather than anything podman
+    # did: docker's docker-default AppArmor profile denies every mount operation, so
+    # storage setup fails with `failed to make mount private: ... permission denied`.
+    # Report the profile next to podman's own error, because podman never mentions it.
+    bad "podman info failed: $(podman info 2>&1 | tail -1) [outer AppArmor profile: $(cat /proc/self/attr/current 2>/dev/null || echo 'none')]"
+fi
 
 echo
 echo '== hatch =='

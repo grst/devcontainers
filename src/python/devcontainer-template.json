@@ -2,7 +2,7 @@
   "id": "python",
   "version": "0.0.0",
   "name": "Python (uv) + Claude Code, hardened",
-  "description": "Python dev container built on ghcr.io/grst/devcontainers/python: uv with Python 3.14, ruff, prek, Claude Code in auto mode, a mandatory egress-firewall choice, and an isolation check that keeps the workspace the only writable host path.",
+  "description": "Python dev container built on ghcr.io/grst/devcontainers/python: uv with Python 3.14, ruff, prek, Claude Code in auto mode, rootless podman for nested containers, a mandatory egress-firewall choice, and an isolation check that keeps the workspace the only writable host path.",
   "documentationURL": "https://github.com/grst/devcontainers",
   "licenseURL": "https://github.com/grst/devcontainers/blob/main/LICENSE",
   "publisher": "grst",

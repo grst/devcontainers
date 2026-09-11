@@ -68,6 +68,26 @@ run_case refuse isolation 'a forwarded SSH agent' \
 run_case refuse isolation 'a mounted container runtime socket' \
     -v "$WORKSPACE" -v /var/run/docker.sock:/var/run/docker.sock
 
+# The other side of that check, which only became possible to get wrong once the
+# image shipped podman: a socket at the same path that the container made itself
+# reaches the container's own runtime, not the host's, and must not fail the
+# container. Its own run, because it has to create the socket before checking.
+if "$ENGINE" run --rm -v "$WORKSPACE" "$IMAGE" bash -c '
+        sudo mkdir -p /run/podman
+        sudo python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX)
+s.bind(\"/run/podman/podman.sock\")"
+        sudo -E /usr/local/bin/devcontainer-isolation' >"$log" 2>&1
+then
+    printf '  \033[32mok\033[0m    %s\n' "a runtime socket the container made itself is accepted"
+    pass=$(( pass + 1 ))
+else
+    printf '  \033[31mFAIL\033[0m  %s\n' "a runtime socket the container made itself was refused"
+    sed 's/^/        | /' "$log"
+    fail=$(( fail + 1 ))
+fi
+
 echo
 echo "== ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

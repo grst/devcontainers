@@ -30,6 +30,9 @@
 # hatch keeps its environments and managed interpreters here.
 ~/.local/share/hatch          rw
 
+# Images and layers pulled by the container's own rootless podman.
+~/.local/share/containers     rw
+
 # The editor server, when VS Code or a JetBrains IDE attaches. A volume, not a
 # host path, but it has to be listed or every VS Code session fails the check.
 ~/.vscode-server              rw
