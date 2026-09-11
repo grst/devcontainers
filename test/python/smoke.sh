@@ -20,8 +20,17 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$(( fail + 1 )); }
 skip() { printf '  \033[33mskip\033[0m  %s\n' "$1"; }
 
 check() { # check <description> <command...>
-    local desc="$1"; shift
-    if "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi
+    local desc="$1" out why; shift
+    if out="$("$@" 2>&1)"; then
+        ok "$desc"
+    else
+        # The last line of output, when there is one. A check that fails without
+        # saying why sends you off to run the command by hand, which is what this
+        # file exists to save you -- and podman in particular reports one-line
+        # errors that name exactly what it could not do.
+        why="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)"
+        bad "${desc}${why:+ -- ${why}}"
+    fi
 }
 
 echo
