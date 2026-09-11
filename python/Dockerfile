@@ -273,6 +273,72 @@ ENV PYTHONUNBUFFERED=1 \
     UV_CACHE_DIR=/home/${USERNAME}/.cache/uv
 
 # ---------------------------------------------------------------------------
+# Nested containers: rootless podman inside the rootless container
+# ---------------------------------------------------------------------------
+# So an agent can build and run containers -- a repo whose tests start one, a
+# Dockerfile it is editing, this image itself -- without a host runtime socket
+# ever being mounted. devcontainer-isolation rejects such a socket as a container
+# escape and always will; this is the alternative to it, not a relaxation of it.
+#
+# It needs four things from the runtime, all of them in devcontainer.json's
+# runArgs with the reasoning next to them: CAP_SYS_ADMIN, unmask=/proc/*,
+# /dev/fuse and /dev/net/tun. Without them podman fails at the first command with
+# an error that names none of this, so smoke.sh checks each prerequisite
+# separately.
+#
+# The packages are named rather than left to apt's Recommends (which
+# --no-install-recommends drops anyway), because each one is load-bearing and its
+# absence surfaces as an unrelated-looking runtime failure:
+#   uidmap          newuidmap/newgidmap, which map the nested subuid range below
+#   crun            the OCI runtime; podman prefers it and it needs no systemd
+#   passt           pasta, the nested rootless network (hence /dev/net/tun)
+#   fuse-overlayfs  the storage driver on a kernel that will not mount overlay
+#                   unprivileged, or when the graph root sits on overlay itself
+#                   (hence /dev/fuse). Where the kernel does allow it, podman
+#                   picks native overlay on its own and this goes unused.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        podman \
+        uidmap \
+        crun \
+        passt \
+        fuse-overlayfs \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    && podman --version
+
+# The nested subuid/subgid ranges, and the least obvious line in this file.
+#
+# The base image ships `vscode:100000:65536`, which cannot work here. Under
+# --userns=keep-id the container's own user namespace maps exactly 65537 ids --
+# 0-999 and 1001-65536 come from the host's subuid range, 1000 is the host user
+# itself -- so id 100000 does not exist in it, and newuidmap's attempt to map it
+# fails with `newuidmap: write to uid_map failed: Operation not permitted`. Every
+# podman command then dies on `cannot set up namespace using /usr/bin/newuidmap`,
+# which says nothing about subuid ranges.
+#
+# So the ranges have to be a subset of what the outer mapping provides, and must
+# skip 1000, which is the container user. Two ranges around it give the full
+# 65535 ids an image can ask for, `nobody` (65534) included -- on a host with the
+# conventional 65536-id subuid range. smoke.sh compares these against
+# /proc/self/uid_map and says so if a host turns out to be stingier.
+RUN printf '%s\n' "${USERNAME}:1:999" "${USERNAME}:1001:64536" \
+        | tee /etc/subuid > /etc/subgid \
+    && chmod 0644 /etc/subuid /etc/subgid
+
+# Naming the driver explicitly is not a preference: with nothing set, podman picks
+# overlay anyway and prints "The storage 'driver' option should be set ..." twice
+# on every single command, which is noise an agent reads as a problem. Nothing
+# else needs configuring -- podman already defaults to the cgroupfs manager and
+# the file event logger in here, because neither systemd nor journald is running.
+#
+# graphRoot is deliberately absent: rootless podman ignores it and uses
+# ~/.local/share/containers/storage, which devcontainer.json puts on a named
+# volume so pulled images survive a rebuild.
+RUN mkdir -p /etc/containers \
+    && printf '%s\n' '[storage]' 'driver = "overlay"' > /etc/containers/storage.conf \
+    && chmod 0644 /etc/containers/storage.conf
+
+# ---------------------------------------------------------------------------
 # Shell configuration
 # ---------------------------------------------------------------------------
 # Source files are stored undotted in this repo and get their dots here: Claude
@@ -345,6 +411,7 @@ RUN mkdir -p \
         "/home/${USERNAME}/.cache" \
         "/home/${USERNAME}/.local/share/uv" \
         "/home/${USERNAME}/.local/share/hatch" \
+        "/home/${USERNAME}/.local/share/containers" \
         /commandhistory \
         /workspace \
     && touch /commandhistory/.zsh_history /commandhistory/.bash_history \

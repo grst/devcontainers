@@ -65,6 +65,35 @@ security.ubuntu.com
 ports.ubuntu.com
 esm.ubuntu.com
 
+# --- Container registries --------------------------------------------------
+# The image ships rootless podman, so a `podman pull` or a `FROM` in a
+# `podman build` has to resolve somewhere. Registries need two hosts, not one:
+# the API host issues the manifest and a separate CDN host serves the blobs, and
+# a pull that reaches only the first fails halfway through with a signed URL in
+# the error message. Docker Hub uses two CDNs and hands out either.
+#
+# This is also where the allowlist is at its most fragile: those CDN names sit
+# behind rotating pools, resolved once at container start, so a long-running
+# container can find that a pull which worked an hour ago no longer does.
+# Restarting it re-resolves everything.
+registry-1.docker.io
+auth.docker.io
+index.docker.io
+production.cloudflare.docker.com
+production.cloudfront.docker.com
+# ghcr.io serves its blobs from pkg-containers.githubusercontent.com, which is
+# not covered by the +github-meta ranges above.
+ghcr.io
+pkg-containers.githubusercontent.com
+quay.io
+cdn.quay.io
+cdn01.quay.io
+cdn02.quay.io
+cdn03.quay.io
+# Where the devcontainer base images live, so this repo's own image can be built
+# inside a container of itself.
+mcr.microsoft.com
+
 # --- apt sources added by the language images -------------------------------
 # The python image installs Google Chrome, which leaves an apt source behind; without
 # this, `apt-get update` inside a firewalled container fails on it confusingly.

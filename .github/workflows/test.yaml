@@ -32,6 +32,15 @@ jobs:
       - name: Give the fixture to uid 1000
         run: sudo chown -R 1000:1000 test/python
 
+      # Nested rootless podman inside the image needs a tap device for pasta and
+      # /dev/fuse for the fuse-overlayfs storage fallback, and `docker run --device`
+      # fails outright if the node does not have them. Runners do not load tun by
+      # default. The same two lines are the host prerequisite documented in the README.
+      - name: Load the kernel modules nested containers need
+        run: |
+          sudo modprobe tun fuse overlay
+          ls -l /dev/net/tun /dev/fuse
+
       # load: true, because everything below runs it with `docker run`.
       - uses: docker/build-push-action@v7
         with:
@@ -42,11 +51,27 @@ jobs:
           cache-to: type=gha,mode=max
 
       # NET_ADMIN is granted so the firewall can actually apply; cases.sh covers the
-      # runs where it deliberately is not.
+      # runs where it deliberately is not. The rest mirror devcontainer.json's runArgs
+      # for nested podman, in docker's spelling for the one that differs:
+      # `systempaths=unconfined` is what podman calls `unmask=/proc/*`. Without them
+      # smoke.sh reports which prerequisite is missing rather than exercising the
+      # nested path, which is the point of having it.
+      #
+      # The named volume is podman's graph root, as on a real host: it keeps images out
+      # of the container's own overlay filesystem, which the kernel will not stack
+      # another overlay on. It is in the image's mount allowlist, so the isolation
+      # check accepts it.
+      #
+      # What this cannot cover: docker is rootful, so in here CAP_SYS_ADMIN is real
+      # host privilege rather than a capability confined to a rootless user namespace.
+      # smoke.sh detects that and skips the containment probes instead of passing them.
       - name: Smoke test (firewall off)
         run: |
           docker run --rm \
             --cap-add=NET_ADMIN --cap-add=NET_RAW \
+            --cap-add=SYS_ADMIN --security-opt systempaths=unconfined \
+            --device /dev/net/tun --device /dev/fuse \
+            -v dc-podman-storage:/home/vscode/.local/share/containers \
             -e DEVCONTAINER_FIREWALL=off \
             -v "${PWD}/test/python:/workspace" \
             dc-python:test \
@@ -56,6 +81,9 @@ jobs:
         run: |
           docker run --rm \
             --cap-add=NET_ADMIN --cap-add=NET_RAW \
+            --cap-add=SYS_ADMIN --security-opt systempaths=unconfined \
+            --device /dev/net/tun --device /dev/fuse \
+            -v dc-podman-storage:/home/vscode/.local/share/containers \
             -e DEVCONTAINER_FIREWALL=on \
             -v "${PWD}/test/python:/workspace" \
             dc-python:test \

@@ -6,7 +6,7 @@ for being equally usable from a terminal and from VS Code.
 
 | | |
 | --- | --- |
-| `ghcr.io/grst/devcontainers/python` | zsh + dotfiles, CLI tools, Claude Code, GitHub Copilot CLI, the firewall and isolation checks, uv + hatch, Python 3.14, ruff, prek, headless Chrome. |
+| `ghcr.io/grst/devcontainers/python` | zsh + dotfiles, CLI tools, Claude Code, GitHub Copilot CLI, the firewall and isolation checks, uv + hatch, Python 3.14, ruff, prek, headless Chrome, rootless podman. |
 | `ghcr.io/grst/devcontainer-templates/python` | the devcontainer Template that generates a repo's `.devcontainer/`. |
 
 Every "why" in this repo lives once, at the code it explains. This file covers usage
@@ -91,6 +91,18 @@ A legitimate extra mount is declared rather than exempted:
 "mounts": ["source=${localEnv:HOME}/models,target=/opt/models,type=bind,readonly"],
 "containerEnv": { "DEVCONTAINER_EXTRA_MOUNTS": "/opt/models:ro" }
 ```
+
+**Nested containers do not weaken either goal.** The image ships rootless podman
+(see [containers inside the container](#containers-inside-the-container)) rather than
+mounting a host runtime socket, which `devcontainer-isolation` rejects and will keep
+rejecting — it is the one thing in this setup that would hand an agent the whole host.
+Making the nested case work costs `CAP_SYS_ADMIN` and `unmask=/proc/*`, and both are
+confined to the container's rootless user namespace: `smoke.sh` asserts that a
+read-only bind still cannot be remounted read-write and that a non-namespaced host
+sysctl still cannot be written. A nested container also inherits the egress
+allowlist, because pasta forwards its traffic through sockets in this container's
+network namespace — also asserted, since otherwise `podman run` would be a
+one-command way around `firewall=on`.
 
 **What this does not protect against.** The container user has passwordless `sudo`,
 which every devcontainer image provides and which normal development depends on. So an
@@ -276,6 +288,58 @@ chromium --headless --no-sandbox --dump-dom file:///workspace/report.html
 `--no-sandbox` is required: the browser's own sandbox needs privileges the container
 does not have, and the container is already the isolation boundary.
 
+## Containers inside the container
+
+`podman` works in here, rootless, nested inside the container's own rootless user
+namespace. No host runtime socket is mounted, and none ever will be — that is the one
+thing `devcontainer-isolation` treats as a container escape.
+
+```bash
+podman run --rm docker.io/library/alpine:3.22 echo hello
+podman build -t mine:dev .
+podman run --rm -v /workspace:/src:ro mine:dev pytest
+```
+
+Pulled images live on a named volume (`containers-${devcontainerId}`), so they survive
+a rebuild and stay out of the container's own filesystem — the kernel will not stack
+overlay on overlay, and a graph root left inside the container forces the slower
+fuse-overlayfs path.
+
+With `firewall=on`, the base allowlist covers Docker Hub, ghcr.io, quay.io and
+mcr.microsoft.com. Registries need both an API host and a blob CDN, and those CDN
+names sit behind rotating pools resolved once at container start, so a pull that
+worked an hour ago can stop working in a long-running container; restarting it
+re-resolves everything. Add your own registry the usual way, with a `.txt` in
+`/etc/devcontainer/firewall-allowlist.d/`.
+
+**Four runArgs make this work**, each documented at the line in `devcontainer.json`,
+and none of them reaching past the container:
+
+| | |
+| --- | --- |
+| `--cap-add=SYS_ADMIN` | `newuidmap` maps the nested subuid range, and the kernel wants `CAP_SYS_ADMIN` over the new namespace because the setuid binary's euid is not that namespace's owner. Scoped to a rootless user namespace, so it is not host privilege — see [the isolation contract](#the-isolation-contract). |
+| `--security-opt=unmask=/proc/*` | A nested container must mount a fresh `procfs`, and the kernel refuses while podman's masked `/proc` paths would be hidden by it. |
+| `--device=/dev/net/tun` | pasta builds the nested container's network on a tap device. |
+| `--device=/dev/fuse` | The fuse-overlayfs storage path, for kernels that will not mount overlay unprivileged. |
+
+The other half is inside the image: `/etc/subuid` is rewritten to ranges that exist
+in the outer `--userns=keep-id` mapping. The base image's `vscode:100000:65536` does
+not, and the failure is unrecognisable — `cannot set up namespace using
+/usr/bin/newuidmap` on every podman command. `python/Dockerfile` has the arithmetic.
+
+No Docker-compatible socket is running, because nothing should have one it did not
+ask for. Tools that insist on one (testcontainers, for example) get it by starting
+the service themselves — podman answers the Docker API on it:
+
+```bash
+podman system service --time 0 unix:///tmp/podman.sock &
+export DOCKER_HOST=unix:///tmp/podman.sock
+```
+
+That socket talks to the container's own rootless podman, so it is not what
+`devcontainer-isolation` refuses — which is a socket from *outside*, reaching the
+host's runtime. The check tells the two apart by which filesystem the socket is on.
+
 ## peon-ping
 
 Claude Code hooks run *inside* the container, but sound and desktop notifications
@@ -319,6 +383,17 @@ means the running kernel no longer matches the modules on disk after a kernel up
 reboot. Where you cannot load modules, set
 `mount_program = "/usr/bin/fuse-overlayfs"` under `[storage.options.overlay]` in
 `~/.config/containers/storage.conf` instead, though it may need `podman system reset`.
+
+Two more device nodes have to exist on the host, because `devcontainer.json` passes
+them in and podman refuses to create the container when one is missing — they are what
+[podman inside the container](#containers-inside-the-container) runs on:
+
+```bash
+ls /dev/net/tun /dev/fuse || sudo modprobe tun fuse
+printf 'tun\nfuse\n' | sudo tee /etc/modules-load.d/devcontainer.conf   # persist
+```
+
+`tun` is normally already loaded, since pasta uses it for the container's own network.
 
 ### If builds fail with `sd-bus call: … Input/output error`
 
@@ -416,22 +491,35 @@ default, and the `.devcontainer/*.sh` scripts are mode `100755`.
 
 `test/python/smoke.sh` runs inside a built container and checks the things that rot
 silently — a tool gone from the archive, a dotfile that stopped parsing, `^R` no longer
-bound to fzf, hatch pointed at the wrong uv.
+bound to fzf, hatch pointed at the wrong uv. It also covers nested podman: each of the
+four runArgs separately (so a missing one is named rather than guessed at), `run`,
+`build`, a nested container running as another uid, that the egress allowlist applies
+to nested containers too, and that `CAP_SYS_ADMIN` in here still cannot remount a
+read-only bind or write a host sysctl.
 
 `test/cases.sh` covers the negative cases, which are the ones that matter: an unset
 firewall choice fails the container, `firewall=on` without `NET_ADMIN` fails it, and the
 isolation check fails on a writable extra mount, an `ro`-declared-but-`rw`-mounted path,
-a forwarded SSH agent, and a mounted runtime socket.
+a forwarded SSH agent, and a mounted runtime socket — while accepting a socket the
+container's own podman created, which is not a window onto the host runtime.
 
 ```bash
 docker build -t dc-python:test python/
 bash test/cases.sh dc-python:test
 
-podman run --rm --cap-add=NET_ADMIN --cap-add=NET_RAW \
+podman run --rm --userns=keep-id --security-opt=label=disable \
+  --cap-add=NET_ADMIN --cap-add=NET_RAW \
+  --cap-add=SYS_ADMIN --security-opt 'unmask=/proc/*' \
+  --device /dev/net/tun --device /dev/fuse \
+  -v smoke-containers:/home/vscode/.local/share/containers \
   -e DEVCONTAINER_FIREWALL=off -v "$PWD/test/python:/workspace" \
   dc-python:test \
   bash -c 'sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
 ```
+
+Run that one under podman, not docker: the nested-podman checks need the flags above,
+and the containment probes are only meaningful when the outer container is rootless —
+under docker they are skipped rather than passed.
 
 Both run in CI on every pull request, alongside the template-source validation and a
 `shellcheck` / `zsh -n` lint job.

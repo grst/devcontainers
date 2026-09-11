@@ -27,7 +27,44 @@
     // leaves that nameserver aimed at nothing, and the container has no working DNS at
     // all: `claude` cannot reach the API and curl fails on every name. It only shows up
     // when the host happens to be using a loopback resolver, so it looks intermittent.
-    "--network=pasta:--map-host-loopback,169.254.1.1"
+    "--network=pasta:--map-host-loopback,169.254.1.1",
+
+    // --- podman inside the container -----------------------------------------
+    // The image ships rootless podman (see the Dockerfile's nested-containers
+    // section) so an agent never needs a host runtime socket, which
+    // devcontainer-isolation refuses. These four are what it takes, and podman
+    // reports none of them by name when they are missing.
+    //
+    // SYS_ADMIN is the one that looks alarming and is not. newuidmap, which maps the
+    // nested subuid range, is setuid-root -- but euid 0 is not the *owner* of the
+    // user namespace it is mapping (the container user is), so the kernel stops
+    // consulting the owner rule and demands CAP_SYS_ADMIN over that namespace
+    // instead. Without it every podman command dies on `newuidmap: write to uid_map
+    // failed: Operation not permitted`.
+    //
+    // What it does not buy an agent in here, because this is a *rootless* user
+    // namespace and the capability is scoped to it: nothing on the host (the kernel
+    // checks against the host's namespace, where this container is an unprivileged
+    // uid), no remounting a read-only bind read-write (mounts inherited by a user
+    // namespace are locked, so /opt/peon-ping stays read-only), and no writing a
+    // non-namespaced sysctl. smoke.sh probes those rather than trusting this comment.
+    "--cap-add=SYS_ADMIN",
+    // podman masks or read-only-mounts a dozen paths under /proc, and the kernel
+    // refuses to mount a fresh procfs in a nested container while any of them are
+    // there -- a new proc mount may not hide locked submounts -- so every `podman
+    // run` failed with ``mount `proc` to `proc`: Operation not permitted``.
+    // Unmasking them is safe for the same reason as above: /proc/sys/kernel and
+    // friends belong to the host's namespace and stay unwritable, while the
+    // /proc/sys/net values a nested container really does set belong to its own
+    // network namespace.
+    "--security-opt=unmask=/proc/*",
+    // /dev/net/tun is required, not optional: pasta builds the nested container's
+    // network on a tap device and fails with `Failed to open() /dev/net/tun`
+    // otherwise. /dev/fuse is the fallback storage path -- podman uses the kernel's
+    // overlay where an unprivileged mount is allowed and fuse-overlayfs where it is
+    // not, and it cannot know which until it tries.
+    "--device=/dev/net/tun",
+    "--device=/dev/fuse"
   ],
 
   "containerUser": "vscode",
@@ -56,6 +93,11 @@
     // survives a rebuild the same way a Claude Code login does.
     "source=copilot-config-${devcontainerId},target=/home/vscode/.copilot,type=volume",
     "source=cache-${devcontainerId},target=/home/vscode/.cache,type=volume",
+    // Images and layers pulled by the container's own podman. On a volume for the
+    // usual reason -- a pull survives a rebuild -- and for one specific to it: the
+    // kernel will not stack overlay on overlay, so a graph root left inside the
+    // container's own filesystem forces the slower fuse-overlayfs path.
+    "source=containers-${devcontainerId},target=/home/vscode/.local/share/containers,type=volume",
     "source=uv-${devcontainerId},target=/home/vscode/.local/share/uv,type=volume",
     "source=hatch-${devcontainerId},target=/home/vscode/.local/share/hatch,type=volume",
     "source=history-${devcontainerId},target=/commandhistory,type=volume",
