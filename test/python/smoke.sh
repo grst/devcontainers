@@ -127,14 +127,22 @@ else
     skip '/opt/peon-ping is not mounted'
 fi
 
+# Is the outer container rootless? An identity uid_map means a rootful runtime --
+# docker, which is what CI has -- and several things below are then either
+# meaningless or outright impossible. Asked once here, used again by the nested
+# container checks further down.
+outer_rootless=true
+grep -qE '^[[:space:]]*0[[:space:]]+0[[:space:]]+4294967295' /proc/self/uid_map \
+    && outer_rootless=false
+
 # The two things CAP_SYS_ADMIN and unmask=/proc/* would cost if the reasoning in
 # devcontainer.json were wrong. Both are probed as root, because as the container
 # user they would fail for a boring lack of privilege and prove nothing.
 #
-# Only meaningful in a rootless container: an identity uid_map means a rootful
-# runtime (docker in CI), where CAP_SYS_ADMIN really is host-level privilege and a
-# remount really does succeed. Skipping there is the honest result, not a pass.
-if grep -qE '^\s*0\s+0\s+4294967295' /proc/self/uid_map; then
+# Only meaningful in a rootless container: in a rootful one CAP_SYS_ADMIN really is
+# host-level privilege and a remount really does succeed. Skipping there is the
+# honest result, not a pass.
+if [ "$outer_rootless" = false ]; then
     skip 'CAP_SYS_ADMIN containment (rootful runtime; not how this image is run)'
 else
     ro_mount="$(awk '$0 ~ / - / {
@@ -237,13 +245,35 @@ echo '== nested containers (podman) =='
 check '/dev/net/tun is passed through (pasta needs a tap device)' test -c /dev/net/tun
 check '/dev/fuse is passed through (fuse-overlayfs storage fallback)' test -c /dev/fuse
 
-# CAP_SYS_ADMIN, read out of the bounding set rather than with capsh, which is a
-# package this image does not otherwise need. Bit 21 is CAP_SYS_ADMIN.
-if (( 0x$(awk '/^CapBnd:/ {print $2}' /proc/self/status) & (1 << 21) )); then
-    ok 'CAP_SYS_ADMIN is present (newuidmap cannot map the nested range without it)'
-else
-    bad 'CAP_SYS_ADMIN is missing -- add "--cap-add=SYS_ADMIN" to runArgs, or podman fails with `newuidmap: write to uid_map failed`'
-fi
+# CAP_SYS_ADMIN, and it has to be *effective* rather than merely in the bounding
+# set. Two different things want it for real: newuidmap, which is setuid-root and so
+# picks it out of the bounding set, and then pasta and crun, which each pivot_root
+# into a fresh mount namespace and get `Operation not permitted` without the
+# capability in hand.
+#
+# That distinction is the whole reason the nested path cannot be exercised under
+# docker: podman raises --cap-add into the *ambient* set for a non-root container
+# user, so the capability is effective, while docker leaves it in the bounding set
+# only. Read from /proc rather than with capsh, which is a package this image does
+# not otherwise need; bit 21 is CAP_SYS_ADMIN.
+sys_admin=none
+(( 0x$(awk '/^CapBnd:/ {print $2}' /proc/self/status) & (1 << 21) )) && sys_admin=bounding
+(( 0x$(awk '/^CapEff:/ {print $2}' /proc/self/status) & (1 << 21) )) && sys_admin=effective
+case "$sys_admin" in
+    effective)
+        ok 'CAP_SYS_ADMIN is effective (newuidmap, and pasta/crun pivot_root, all need it)'
+        ;;
+    bounding)
+        if [ "$outer_rootless" = true ]; then
+            bad 'CAP_SYS_ADMIN is in the bounding set but not effective -- podman makes --cap-add ambient for the container user, so something has un-done that'
+        else
+            skip 'CAP_SYS_ADMIN is bounding-only (a rootful runtime grants a non-root user no ambient capability)'
+        fi
+        ;;
+    none)
+        bad 'CAP_SYS_ADMIN is missing -- add "--cap-add=SYS_ADMIN" to runArgs, or podman fails with `newuidmap: write to uid_map failed`'
+        ;;
+esac
 
 # A nested container has to mount a fresh procfs, and the kernel refuses while any
 # locked submount under /proc would be hidden by it -- which is exactly what
@@ -285,7 +315,14 @@ if podman info >/dev/null 2>&1; then
     # that cannot reach one is a skip, not a failure: the checks below are about
     # nested containers working, and this file is meant to run offline too.
     nested_image='docker.io/library/alpine:3.22'
-    if podman pull -q "$nested_image" >/dev/null 2>&1; then
+    if [ "$sys_admin" != effective ]; then
+        # Everything up to here -- storage, the user namespace, newuidmap, the subuid
+        # arithmetic -- has been exercised. Starting a container cannot be: pasta fails
+        # with `Failed to pivot_root() into empty tmpfs: Operation not permitted`, and
+        # so does crun even with --network=host. This is the one part that needs a
+        # rootless outer container, and the README says where it is exercised instead.
+        skip 'nested run, build and egress (pivot_root needs CAP_SYS_ADMIN effective, so a rootless outer container)'
+    elif podman pull -q "$nested_image" >/dev/null 2>&1; then
         # Reported in full, and with a follow-up probe, rather than as one line:
         # when this fails it is the *outer* runtime's doing -- a MAC profile, a
         # seccomp filter, a missing device -- and the useful sentence is rarely the

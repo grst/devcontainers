@@ -517,9 +517,14 @@ podman run --rm --userns=keep-id --security-opt=label=disable \
   bash -c 'sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
 ```
 
-Run that one under podman, not docker: the nested-podman checks need the flags above,
-and the containment probes are only meaningful when the outer container is rootless —
-under docker they are skipped rather than passed.
+Run that one under podman, not docker. Starting a nested container needs
+`CAP_SYS_ADMIN` to be *effective*, and only podman raises `--cap-add` into the
+ambient set for a non-root container user — under docker the capability sits in the
+bounding set alone, so pasta and crun both fail their `pivot_root` and the nested
+`run`/`build`/egress checks skip rather than pass. CI therefore covers everything
+up to starting a nested container (packages, devices, `/proc`, the subuid
+arithmetic, storage and the user namespace via `podman info`); the rest, and the
+`CAP_SYS_ADMIN` containment probes, are exercised here, on a host.
 
 Both run in CI on every pull request, alongside the template-source validation and a
 `shellcheck` / `zsh -n` lint job.
