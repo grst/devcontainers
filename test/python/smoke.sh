@@ -286,7 +286,22 @@ if podman info >/dev/null 2>&1; then
     # nested containers working, and this file is meant to run offline too.
     nested_image='docker.io/library/alpine:3.22'
     if podman pull -q "$nested_image" >/dev/null 2>&1; then
-        check 'podman run in a nested container' podman run --rm "$nested_image" true
+        # Reported in full, and with a follow-up probe, rather than as one line:
+        # when this fails it is the *outer* runtime's doing -- a MAC profile, a
+        # seccomp filter, a missing device -- and the useful sentence is rarely the
+        # last one. pasta, for one, says what it could not do and then exits with
+        # `Failed to sandbox process`, which names nothing.
+        if nested_out="$(podman run --rm "$nested_image" true 2>&1)"; then
+            ok 'podman run in a nested container'
+        else
+            bad 'podman run in a nested container'
+            printf '%s\n' "$nested_out" | sed 's/^/          | /'
+            # Splits the two halves apart: --network=host skips pasta entirely, so if
+            # this works the nested *container* is fine and only its network is not.
+            if podman run --rm --network=host "$nested_image" true >/dev/null 2>&1; then
+                printf '          | (--network=host works, so it is the nested network, not the container)\n'
+            fi
+        fi
         # Runs as a uid other than the container user's, which is the half of the
         # mapping that only works because /etc/subuid is right.
         check 'a nested container can run as another uid' \
