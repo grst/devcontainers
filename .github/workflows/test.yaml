@@ -62,6 +62,13 @@ jobs:
       # another overlay on. It is in the image's mount allowlist, so the isolation
       # check accepts it.
       #
+      # apparmor=unconfined is needed on top of all that, and only under docker: the
+      # daemon applies its docker-default profile, which denies *every* mount
+      # operation regardless of capabilities, so podman's storage setup fails with
+      # `failed to make mount private: ... permission denied` before it does anything
+      # interesting. Rootless podman cannot apply an AppArmor profile to a container
+      # at all, so the real setup never meets this.
+      #
       # What this cannot cover: docker is rootful, so in here CAP_SYS_ADMIN is real
       # host privilege rather than a capability confined to a rootless user namespace.
       # smoke.sh detects that and skips the containment probes instead of passing them.
@@ -70,6 +77,7 @@ jobs:
           docker run --rm \
             --cap-add=NET_ADMIN --cap-add=NET_RAW \
             --cap-add=SYS_ADMIN --security-opt systempaths=unconfined \
+            --security-opt apparmor=unconfined \
             --device /dev/net/tun --device /dev/fuse \
             -v dc-podman-storage:/home/vscode/.local/share/containers \
             -e DEVCONTAINER_FIREWALL=off \
@@ -82,6 +90,7 @@ jobs:
           docker run --rm \
             --cap-add=NET_ADMIN --cap-add=NET_RAW \
             --cap-add=SYS_ADMIN --security-opt systempaths=unconfined \
+            --security-opt apparmor=unconfined \
             --device /dev/net/tun --device /dev/fuse \
             -v dc-podman-storage:/home/vscode/.local/share/containers \
             -e DEVCONTAINER_FIREWALL=on \

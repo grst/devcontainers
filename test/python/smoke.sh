@@ -319,7 +319,12 @@ if podman info >/dev/null 2>&1; then
         skip "nested run/build (could not pull ${nested_image}; needs egress to a registry)"
     fi
 else
-    bad "podman info failed: $(podman info 2>&1 | tail -1)"
+    # A denied mount here, with CAP_SYS_ADMIN present, is almost always a mandatory
+    # access control profile on the *outer* container rather than anything podman
+    # did: docker's docker-default AppArmor profile denies every mount operation, so
+    # storage setup fails with `failed to make mount private: ... permission denied`.
+    # Report the profile next to podman's own error, because podman never mentions it.
+    bad "podman info failed: $(podman info 2>&1 | tail -1) [outer AppArmor profile: $(cat /proc/self/attr/current 2>/dev/null || echo 'none')]"
 fi
 
 echo
