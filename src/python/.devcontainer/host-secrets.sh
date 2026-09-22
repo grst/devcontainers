@@ -44,12 +44,35 @@ set -uo pipefail
 # the volumes -- so write access is an explicit act per container instead of an ambient
 # capability every session inherits.
 declare -A SECRETS=(
-    [ANTHROPIC_API_KEY]="${ANTHROPIC_KEY_ENTRY:-Anthropic API key}"
     [GH_TOKEN]="${GH_TOKEN_ENTRY:-GitHub read-only token (devcontainer)}"
 )
 
 # stdout carries NAME=value and nothing else; all human output goes to stderr.
 log() { printf 'host-secrets: %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# claudeAuth
+# ---------------------------------------------------------------------------
+# Read back out of the applied devcontainer.json, where the template stamped it.
+# A grep and not jq: that file is JSONC and jq cannot parse the comments in it.
+# This is the same shape the CI apply-check uses on the same key.
+#
+# Resolved relative to this script rather than $PWD so the standalone invocation in
+# the header works from anywhere.
+#
+# The key is fetched only in api-key mode, and under the name devcontainer.json
+# actually reads -- DEVCONTAINER_ANTHROPIC_API_KEY, not ANTHROPIC_API_KEY. That
+# rename is what keeps a key exported in your shell for some unrelated purpose from
+# leaking into a login-mode container; the variable is still ANTHROPIC_API_KEY on
+# the inside. In login mode nothing Anthropic is resolved at all, so a locked
+# KeePassXC no longer stops the container from starting.
+if grep -q '"DEVCONTAINER_CLAUDE_AUTH"[[:space:]]*:[[:space:]]*"login"' \
+    "$(dirname "${BASH_SOURCE[0]}")/devcontainer.json" 2>/dev/null
+then
+    log 'claudeAuth=login: passing no Anthropic key; `claude` uses the login stored in the container'
+else
+    SECRETS[DEVCONTAINER_ANTHROPIC_API_KEY]="${ANTHROPIC_KEY_ENTRY:-Anthropic API key}"
+fi
 
 # Probed once, up front, so "KeePassXC is not running" gets reported as itself instead
 # of as a failed lookup. ListNames rather than ListActivatableNames on purpose:

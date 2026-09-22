@@ -109,6 +109,11 @@
     // container start unless this is exactly "on" or "off".
     "DEVCONTAINER_FIREWALL": "${templateOption:firewall}",
     "DEVCONTAINER_PEON": "${templateOption:peonPing}",
+    // "login" or "api-key". Unlike the firewall this one has a default, and the
+    // default is the end that carries no host credential: a repo that never answers
+    // the question gets a container with no API key in it, where `claude` uses a
+    // login made in here. devcontainer-claude-auth refuses any other value.
+    "DEVCONTAINER_CLAUDE_AUTH": "${templateOption:claudeAuth}",
 
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
     // Tells Claude Code it is inside a sandboxed container, which is what makes
@@ -139,16 +144,26 @@
   // effect in the next shell instead of needing the container recreated.
   //
   // GH_TOKEN must be READ-ONLY -- see host-secrets.sh for why.
+  //
+  // The Anthropic key is read from DEVCONTAINER_ANTHROPIC_API_KEY on the host and
+  // not from ANTHROPIC_API_KEY, and that is the whole enforcement mechanism behind
+  // claudeAuth=login rather than a typo. Only up.sh sets the devcontainer-specific
+  // name, and only in api-key mode, so a plain ANTHROPIC_API_KEY that happens to be
+  // exported in the shell you launched `code` from cannot reach a login-mode
+  // container and silently bill the API. The name *inside* the container is still
+  // ANTHROPIC_API_KEY, which is what Claude Code reads.
   "remoteEnv": {
-    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "ANTHROPIC_API_KEY": "${localEnv:DEVCONTAINER_ANTHROPIC_API_KEY}",
     "GH_TOKEN": "${localEnv:GH_TOKEN}"
   },
 
   "postCreateCommand": "bash .devcontainer/post-create.sh",
 
-  // Both run on every start, and a non-zero exit fails `devcontainer up`. Order
-  // matters: prove the container is isolated before opening any network.
-  "postStartCommand": "sudo /usr/local/bin/devcontainer-isolation && sudo /usr/local/bin/devcontainer-firewall",
+  // All three run on every start, and a non-zero exit fails `devcontainer up`. Order
+  // matters: prove the container is isolated before opening any network. The auth
+  // gate opens nothing, so it is free to go first -- and it runs without sudo,
+  // because all it does is read one environment variable.
+  "postStartCommand": "/usr/local/bin/devcontainer-claude-auth && sudo /usr/local/bin/devcontainer-isolation && sudo /usr/local/bin/devcontainer-firewall",
 
   "customizations": {
     "vscode": {

@@ -372,23 +372,27 @@ RUN chsh -s /bin/zsh "${USERNAME}" \
         >> /etc/bash.bashrc
 
 # ---------------------------------------------------------------------------
-# Firewall, isolation check, status line
+# Firewall, isolation check, auth gate, status line
 # ---------------------------------------------------------------------------
-COPY bin/devcontainer-firewall bin/devcontainer-isolation /usr/local/bin/
+COPY bin/devcontainer-firewall bin/devcontainer-isolation bin/devcontainer-claude-auth /usr/local/bin/
 COPY bin/statusline.sh /usr/local/share/devcontainer/statusline.sh
 COPY etc/firewall-allowlist.txt /etc/devcontainer/firewall-allowlist.d/00-base.txt
 COPY etc/mount-allowlist.txt /etc/devcontainer/mount-allowlist.txt
 
 RUN chmod 0755 /usr/local/bin/devcontainer-firewall \
         /usr/local/bin/devcontainer-isolation \
+        /usr/local/bin/devcontainer-claude-auth \
         /usr/local/share/devcontainer/statusline.sh \
     && chmod 0644 /etc/devcontainer/mount-allowlist.txt \
         /etc/devcontainer/firewall-allowlist.d/00-base.txt
 
-# postStartCommand runs both of these through sudo. env_keep is required because
-# sudo scrubs the environment by default and both scripts are configured through
-# it -- without this, DEVCONTAINER_FIREWALL would always look unset and the gate
-# would fire on every start.
+# postStartCommand runs the firewall and isolation checks through sudo. env_keep is
+# required because sudo scrubs the environment by default and both scripts are
+# configured through it -- without this, DEVCONTAINER_FIREWALL would always look
+# unset and the gate would fire on every start.
+# devcontainer-claude-auth is deliberately absent from both lines: it reads one
+# environment variable and changes nothing, so postStartCommand runs it unprivileged
+# and it needs neither a NOPASSWD entry nor env_keep.
 # SSH_AUTH_SOCK is in env_keep so the isolation check can see a forwarded agent: it
 # cannot read the container user's /proc/<pid>/environ instead, because under rootless
 # podman the container root is a mapped subuid with no privilege over that user.
