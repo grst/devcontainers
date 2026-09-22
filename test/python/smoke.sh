@@ -189,6 +189,39 @@ fi
 check 'the base allowlist is installed' test -r /etc/devcontainer/firewall-allowlist.d/00-base.txt
 
 echo
+echo '== claude auth gate =='
+# Unprivileged on purpose: postStartCommand runs it without sudo, and it is not in
+# the NOPASSWD list, so `sudo devcontainer-claude-auth` tests a path that does not
+# exist.
+if DEVCONTAINER_CLAUDE_AUTH='' /usr/local/bin/devcontainer-claude-auth >/dev/null 2>&1; then
+    bad 'an empty DEVCONTAINER_CLAUDE_AUTH was accepted -- the gate is not gating'
+else
+    ok 'empty DEVCONTAINER_CLAUDE_AUTH is refused'
+fi
+if DEVCONTAINER_CLAUDE_AUTH=oauth /usr/local/bin/devcontainer-claude-auth >/dev/null 2>&1; then
+    bad 'an invalid DEVCONTAINER_CLAUDE_AUTH was accepted'
+else
+    ok 'invalid DEVCONTAINER_CLAUDE_AUTH is refused'
+fi
+# The mode this container was actually started in, and the one invariant that goes
+# with it: login mode means no key, because Claude Code prefers a key over the stored
+# login and would bill the API while every message said otherwise.
+auth_mode="${DEVCONTAINER_CLAUDE_AUTH:-unset}"
+echo "        claudeAuth = ${auth_mode}"
+case "$auth_mode" in
+    login)
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            bad 'claudeAuth=login but ANTHROPIC_API_KEY is set in the container'
+        else
+            ok 'claudeAuth=login and no ANTHROPIC_API_KEY reached the container'
+        fi
+        ;;
+    api-key) ok 'claudeAuth=api-key' ;;
+    *)       skip "claudeAuth is ${auth_mode} (not started through the template)" ;;
+esac
+check 'CLAUDE_CONFIG_DIR is writable' test -w "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+echo
 echo '== firewall behaviour =='
 fw_state="$(cat /run/devcontainer/firewall.state 2>/dev/null || echo unset)"
 echo "        firewall.state = ${fw_state}"

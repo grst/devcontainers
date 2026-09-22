@@ -14,6 +14,12 @@
       "description": "Restrict outbound network traffic to an allowlist? There is deliberately no default: 'on' gives a default-DROP egress firewall (Anthropic API, PyPI, npm, GitHub, Ubuntu archive) and adds the NET_ADMIN/NET_RAW capabilities it needs; 'off' leaves egress unrestricted, which means an agent that reads a malicious file can reach any host on the internet. The container refuses to start until this is set.",
       "enum": ["on", "off"]
     },
+    "claudeAuth": {
+      "type": "string",
+      "description": "How Claude Code authenticates in this repo. 'login' passes no API key into the container at all: run 'claude' once in here and log in, and that login lives in the container's own config volume and survives rebuilds. 'api-key' resolves an Anthropic API key on the host and injects it, which bills the API instead of your subscription. The container refuses to start on any other value.",
+      "enum": ["api-key", "login"],
+      "default": "login"
+    },
     "pythonVersion": {
       "type": "string",
       "description": "Default Python for a bare 'uv venv' / 'uv sync'. A project's own requires-python or .python-version still wins. 3.14 and 3.13 are baked into the image; anything else is downloaded on first use.",

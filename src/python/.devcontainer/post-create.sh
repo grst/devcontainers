@@ -41,39 +41,70 @@ write_json "$CLAUDE_DIR/.claude.json" \
      | .projects = ((.projects // {}) | .[$ws] = ((.[$ws] // {}) + {hasTrustDialogAccepted: true}))' \
     --arg ws "${PWD}"
 
+# ---------------------------------------------------------------------------
+# Claude Code credentials
+# ---------------------------------------------------------------------------
+# Which of the two ways this repo authenticates is the claudeAuth template option,
+# surfaced as DEVCONTAINER_CLAUDE_AUTH in containerEnv. devcontainer-claude-auth has
+# already refused the container if it is neither value, so the else branch here is
+# api-key by elimination rather than by guess.
+#
+# Nothing below is fatal. post-create runs before the user has had any chance to log
+# in, so it must never be the thing that stops them from doing so; up.sh is where a
+# missing secret *is* fatal, because that is where KeePassXC can be reached and the
+# cause reported.
+if [ "${DEVCONTAINER_CLAUDE_AUTH:-}" = 'login' ]; then
+    # No key is passed in at all in this mode, so there is nothing to pre-approve --
+    # writing customApiKeyResponses here would only record an approval for a key that
+    # will never arrive.
+    if [ -s "$CLAUDE_DIR/.credentials.json" ]; then
+        echo '    claudeAuth=login: a stored login is present in the config volume'
+    else
+        cat <<'EOF'
+    claudeAuth=login: no stored login yet.
+       Run `claude` in here and log in once. The credentials land in this
+       container's own config volume, not on the host, and survive a rebuild --
+       `podman volume rm` is what clears them.
+EOF
+    fi
+    # Belt and braces with the start-time gate, which says the same thing louder: a
+    # key in the environment beats the stored login, so login mode with a key set is
+    # a session that silently bills the API.
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        echo '    !! but ANTHROPIC_API_KEY is set, and Claude Code prefers it over the login' >&2
+    fi
+
 # Pre-approve the API key, matched by its last 20 characters, which is how the CLI
 # records the approval -- otherwise the first launch asks about it.
 #
 # Note the test is for a *non-empty* value. remoteEnv substitutes ${localEnv:X} with an
 # empty string when X is unset on the host, so a missing secret arrives here as
 # ANTHROPIC_API_KEY='' rather than as an unset variable.
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     write_json "$CLAUDE_DIR/.claude.json" \
         '.customApiKeyResponses = ((.customApiKeyResponses // {})
             | .approved = (((.approved // []) + [$k]) | unique)
             | .rejected = (.rejected // []))' \
         --arg k "${ANTHROPIC_API_KEY: -20}"
-    echo '    ANTHROPIC_API_KEY found and pre-approved'
+    echo '    claudeAuth=api-key: key found and pre-approved'
 elif [ -s "$CLAUDE_DIR/.credentials.json" ]; then
-    echo '    No ANTHROPIC_API_KEY, but a stored login is present in the config volume'
+    echo '    claudeAuth=api-key but no key arrived; falling back to the stored login'
 else
     # Loud on purpose, and last-but-one in the output so it is the thing still on
     # screen. This is the state that prompted the check: no key, no stored login, and
     # `claude` announcing it is not logged in only once you try to use it.
-    #
-    # Not a hard failure: `claude` can complete an interactive OAuth login inside the
-    # container, and post-create running before that is possible must not block it.
-    # The host side (up.sh) is where a missing secret *is* fatal, because that is where
-    # KeePassXC can be reached and the cause reported.
     cat >&2 <<'EOF'
 
-    !! No Claude Code credentials: ANTHROPIC_API_KEY is empty and the config volume
-       holds no login, so `claude` will start unauthenticated.
+    !! No Claude Code credentials: claudeAuth=api-key, ANTHROPIC_API_KEY is empty and
+       the config volume holds no login, so `claude` will start unauthenticated.
        Started with up.sh?      It should have failed first -- check host-secrets.sh.
        Started from VS Code?    up.sh never runs, and a desktop-launched window has
-                                nothing to pass. Launch `code` from a shell with the
-                                variables exported, or run `claude` in here once and
-                                log in -- that login persists in the volume.
+                                nothing to pass. Export DEVCONTAINER_ANTHROPIC_API_KEY
+                                (that name, not ANTHROPIC_API_KEY -- see
+                                devcontainer.json) in the shell you launch `code` from.
+       Either way:              set claudeAuth=login instead and log in in here, or
+                                run `claude` and log in once -- that login persists in
+                                the config volume.
 
 EOF
 fi
@@ -142,7 +173,17 @@ if [ -f pyproject.toml ]; then
         echo '    uv sync failed; fix pyproject.toml and re-run this script'
     fi
 elif [ -f requirements.txt ]; then
-    uv venv && uv pip install -r requirements.txt
+    # --allow-existing, because .venv sits in the bind-mounted workspace and so
+    # outlives every rebuild, and a bare `uv venv` asks "A virtual environment already
+    # exists at `.venv`. Do you want to replace it?" -- a prompt in postCreateCommand
+    # is a hang, not a question. Preserving rather than clearing is also what this
+    # script's "safe to re-run by hand" contract implies; uv still replaces, without
+    # asking, a venv whose interpreter has gone missing, which is the case that
+    # actually needs it. UV_VENV_CLEAR=1 forces a rebuild from scratch (uv says so
+    # in the prompt's own hint).
+    uv venv --allow-existing && uv pip install -r requirements.txt
+elif [ -d .venv ]; then
+    echo '    Reusing the existing .venv'
 else
     echo '    No pyproject.toml yet; creating a bare venv'
     uv venv

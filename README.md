@@ -34,7 +34,11 @@ the newest build of `main`, and a release is an exact `X.Y.Z`. See
 `firewall` has no default, and the container refuses to start until it is set — see
 [the firewall](#the-firewall-is-a-mandatory-choice). A non-interactive apply does not
 itself refuse; it leaves the value empty and the runtime gate catches it. The other
-options (`pythonVersion`, `peonPing`, `imageTag`) all have sensible defaults.
+options (`claudeAuth`, `pythonVersion`, `peonPing`, `imageTag`) all have defaults.
+
+`claudeAuth` decides how Claude Code pays for itself in this repo, and defaults to
+`login` — no API key enters the container at all. See
+[how Claude Code authenticates](#how-claude-code-authenticates).
 
 Re-applying the template over an existing `.devcontainer/` is how you upgrade a repo.
 `post-create.sh` is idempotent and safe to re-run by hand, which is what you want after
@@ -175,6 +179,50 @@ The status line (context usage, session tokens, elapsed time, rate limits, cost)
 at `/usr/local/share/devcontainer/statusline.sh` in the image, so there is one copy to
 maintain rather than one vendored per repo.
 
+### How Claude Code authenticates
+
+Per repo, via the `claudeAuth` template option. Both values are real choices; the
+default is the one that carries no host credential.
+
+| `claudeAuth` | What happens |
+| --- | --- |
+| `login` *(default)* | No API key is passed in. Run `claude` in the container and log in once. |
+| `api-key` | `up.sh` resolves an Anthropic API key on the host and injects it, billing the API. |
+
+```bash
+devcontainer templates apply \
+  -t ghcr.io/grst/devcontainer-templates/python:0.0 \
+  -a '{"firewall":"on","claudeAuth":"login"}'
+```
+
+`devcontainer-claude-auth` runs from `postStartCommand` and fails the container on any
+other value, including the empty one a hand-edited `devcontainer.json` can produce. It
+is the one check that does *not* run through `sudo`: it reads an environment variable
+and changes nothing.
+
+**Upgrading a repo applied before this option existed** will therefore fail on the next
+start, with a message naming the two values — re-apply the template, or add
+`"DEVCONTAINER_CLAUDE_AUTH"` to `containerEnv` by hand. A repo staying on `api-key` also
+has to rename its host export to `DEVCONTAINER_ANTHROPIC_API_KEY`; `up.sh` does that for
+you, VS Code does not.
+
+**The login is per container and persists.** Claude Code writes it to
+`$CLAUDE_CONFIG_DIR/.credentials.json`, which is on the `claude-config-${devcontainerId}`
+volume — so it survives `up.sh --remove-existing-container`, two repos never share one,
+and nothing about it exists on the host. The volume-teardown recipe
+[above](#use-it-in-a-repository) is what clears it. With `firewall=on` the OAuth flow
+works unchanged: `claude.ai` and `console.anthropic.com` are in the base allowlist. If
+`claude` tries to open a browser the container has no display for, take the URL it
+prints and finish the exchange on the host.
+
+**`login` mode is enforced structurally, not by asking nicely.** `remoteEnv` reads
+`${localEnv:DEVCONTAINER_ANTHROPIC_API_KEY}` — a devcontainer-specific name that only
+`up.sh` sets, and only in `api-key` mode — rather than `${localEnv:ANTHROPIC_API_KEY}`.
+An `ANTHROPIC_API_KEY` exported in the shell you launch `code` from therefore cannot
+reach a login-mode container and silently bill the API instead of your subscription.
+The variable is still `ANTHROPIC_API_KEY` on the inside, which is what Claude Code
+reads. In `api-key` mode from VS Code, export **`DEVCONTAINER_ANTHROPIC_API_KEY`**.
+
 ## GitHub Copilot CLI
 
 `copilot` is in the image next to `claude`, pinned in `python/Dockerfile` like every
@@ -211,8 +259,12 @@ DEVCONTAINER_SKIP_SECRETS=1 .devcontainer/up.sh
 
 | Variable | KeePassXC entry title | Notes |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | `Anthropic API key` | Without it, `claude` uses the login stored in the config volume, which survives rebuilds. |
+| `DEVCONTAINER_ANTHROPIC_API_KEY` | `Anthropic API key` | Fetched **only** when `claudeAuth=api-key`; arrives in the container as `ANTHROPIC_API_KEY`. |
 | `GH_TOKEN` | `GitHub read-only token (devcontainer)` | Must be **read-only**. |
+
+With `claudeAuth=login`, `host-secrets.sh` skips the Anthropic lookup entirely, so a
+locked KeePassXC no longer stops the container from starting. It reads the mode back out
+of the applied `.devcontainer/devcontainer.json`.
 
 Override a title per machine: `export ANTHROPIC_KEY_ENTRY=…`, `export
 GH_TOKEN_ENTRY=…`.
@@ -231,7 +283,10 @@ Two things that will bite you otherwise:
 - **The VS Code path cannot fetch anything itself.** `up.sh` never runs there and
   `initializeCommand` cannot export variables back to the CLI, so Reopen-in-Container
   depends entirely on the variables already being in VS Code's environment. Start
-  `code` from a shell that has them, or run `claude` once in the container and log in.
+  `code` from a shell that has them — and note the Anthropic one is
+  `DEVCONTAINER_ANTHROPIC_API_KEY`, not `ANTHROPIC_API_KEY` — or use the default
+  `claudeAuth=login` and log in inside the container instead, which needs nothing from
+  the host at all.
 
 KeePassXC one-time setup: *Settings → Secret Service Integration → Enable*, then
 *Manage exposed database groups* and tick only the group holding these entries.
@@ -273,6 +328,14 @@ if you want it to stick.
 
 Globally available via `uv tool`, each isolated from any project venv and from each
 other: `ruff`, `prek`, `pre-commit`, `hatch`, `ipython`, `zizmor`, `cruft`.
+
+`post-create.sh` sets the project environment up: `uv sync --all-groups` when there is a
+`pyproject.toml`, `uv venv --allow-existing` plus `uv pip install` for a
+`requirements.txt`, and otherwise a bare venv — reusing `.venv` if one is already there.
+It reuses rather than replaces because `.venv` lives in the bind-mounted workspace and
+so outlives every rebuild, and a bare `uv venv` would stop to ask whether to replace it,
+which in `postCreateCommand` is a hang rather than a question. `UV_VENV_CLEAR=1` forces
+a rebuild from scratch.
 
 A headless browser is installed so an agent can look at rendered HTML — Google Chrome,
 with `chromium` as a symlink to it (the Dockerfile explains why not `apt install
@@ -498,10 +561,11 @@ to nested containers too, and that `CAP_SYS_ADMIN` in here still cannot remount 
 read-only bind or write a host sysctl.
 
 `test/cases.sh` covers the negative cases, which are the ones that matter: an unset
-firewall choice fails the container, `firewall=on` without `NET_ADMIN` fails it, and the
-isolation check fails on a writable extra mount, an `ro`-declared-but-`rw`-mounted path,
-a forwarded SSH agent, and a mounted runtime socket — while accepting a socket the
-container's own podman created, which is not a window onto the host runtime.
+firewall choice fails the container, `firewall=on` without `NET_ADMIN` fails it, an
+unset or unrecognised `claudeAuth` fails it, and the isolation check fails on a writable
+extra mount, an `ro`-declared-but-`rw`-mounted path, a forwarded SSH agent, and a
+mounted runtime socket — while accepting a socket the container's own podman created,
+which is not a window onto the host runtime.
 
 ```bash
 docker build -t dc-python:test python/
@@ -512,7 +576,8 @@ podman run --rm --userns=keep-id --security-opt=label=disable \
   --cap-add=SYS_ADMIN --security-opt 'unmask=/proc/*' \
   --device /dev/net/tun --device /dev/fuse \
   -v smoke-containers:/home/vscode/.local/share/containers \
-  -e DEVCONTAINER_FIREWALL=off -v "$PWD/test/python:/workspace" \
+  -e DEVCONTAINER_FIREWALL=off -e DEVCONTAINER_CLAUDE_AUTH=login \
+  -v "$PWD/test/python:/workspace" \
   dc-python:test \
   bash -c 'sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
 ```

@@ -90,10 +90,10 @@ jobs:
             --security-opt apparmor=unconfined \
             --device /dev/net/tun --device /dev/fuse \
             -v dc-podman-storage:/home/vscode/.local/share/containers \
-            -e DEVCONTAINER_FIREWALL=off \
+            -e DEVCONTAINER_FIREWALL=off -e DEVCONTAINER_CLAUDE_AUTH=login \
             -v "${PWD}/test/python:/workspace" \
             dc-python:test \
-            bash -c 'sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
+            bash -c '/usr/local/bin/devcontainer-claude-auth && sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
 
       - name: Smoke test (firewall on)
         run: |
@@ -103,10 +103,10 @@ jobs:
             --security-opt apparmor=unconfined \
             --device /dev/net/tun --device /dev/fuse \
             -v dc-podman-storage:/home/vscode/.local/share/containers \
-            -e DEVCONTAINER_FIREWALL=on \
+            -e DEVCONTAINER_FIREWALL=on -e DEVCONTAINER_CLAUDE_AUTH=api-key \
             -v "${PWD}/test/python:/workspace" \
             dc-python:test \
-            bash -c 'sudo -E /usr/local/bin/devcontainer-isolation && sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
+            bash -c '/usr/local/bin/devcontainer-claude-auth && sudo -E /usr/local/bin/devcontainer-isolation && sudo -E /usr/local/bin/devcontainer-firewall && bash smoke.sh'
 
       # devcontainer-firewall verifies its own rules and refuses to report success
       # otherwise, but it can only probe a family the container actually has, so on a
@@ -254,6 +254,18 @@ jobs:
           fi
           grep -q '"DEVCONTAINER_FIREWALL": "on"' .devcontainer/devcontainer.json \
             || { echo '::error::firewall=on did not reach containerEnv'; exit 1; }
+
+          # claudeAuth was not passed, so this also pins the other half of the CLI's
+          # option handling from the firewall case below: an option that *declares* a
+          # default really is substituted with it, rather than left empty.
+          grep -q '"DEVCONTAINER_CLAUDE_AUTH": "login"' .devcontainer/devcontainer.json \
+            || { echo '::error::claudeAuth did not default to login in containerEnv'; exit 1; }
+
+          # The rename is the whole enforcement mechanism behind claudeAuth=login: a
+          # plain ANTHROPIC_API_KEY on the host must not be able to reach the container.
+          grep -q '"ANTHROPIC_API_KEY": "${localEnv:DEVCONTAINER_ANTHROPIC_API_KEY}"' \
+            .devcontainer/devcontainer.json \
+            || { echo '::error::remoteEnv no longer reads DEVCONTAINER_ANTHROPIC_API_KEY'; exit 1; }
           echo 'ok: applied template is complete, substituted and executable'
 
       # Pins what the CLI really does with a mandatory option, which is weaker than it
@@ -281,7 +293,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y shellcheck zsh
 
       # Derived, not hand-listed: a hardcoded set of paths drifts the moment a script
-      # is added. The second pattern catches the two commands that carry no extension.
+      # is added. The second pattern catches the commands that carry no extension.
       - name: shellcheck
         run: shellcheck --severity=warning $(git ls-files '*.sh' 'python/bin/devcontainer-*')
 

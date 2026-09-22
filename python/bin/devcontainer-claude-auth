@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Gate: refuse to start unless this repo has said how Claude Code authenticates.
+#
+# Run from postStartCommand, ahead of the isolation and firewall checks, and
+# deliberately NOT through sudo -- it reads one environment variable and opens
+# nothing, so it has no business running as root.
+#
+# DEVCONTAINER_CLAUDE_AUTH comes from the claudeAuth template option via
+# containerEnv. The option declares a default, so an empty value here means the
+# consumer's devcontainer.json predates the option or was hand-edited -- and
+# guessing which billing the user meant is exactly the choice that should not be
+# made for them.
+set -uo pipefail
+
+AUTH="${DEVCONTAINER_CLAUDE_AUTH:-}"
+
+case "$AUTH" in
+    api-key | login) ;;
+    *)
+        {
+            echo
+            if [ -z "$AUTH" ]; then
+                echo 'DEVCONTAINER_CLAUDE_AUTH is not set.'
+            else
+                printf 'DEVCONTAINER_CLAUDE_AUTH is "%s", which is not a value this image knows.\n' "$AUTH"
+            fi
+            cat <<'MSG'
+
+Set the claudeAuth template option, or containerEnv.DEVCONTAINER_CLAUDE_AUTH in
+.devcontainer/devcontainer.json, to one of:
+
+  login     no API key is passed in at all. Run `claude` in here and log in once;
+            the login lives in this container's config volume and survives rebuilds.
+  api-key   up.sh resolves an Anthropic API key on the host and injects it, which
+            bills the API rather than your subscription.
+
+MSG
+        } >&2
+        exit 1
+        ;;
+esac
+
+# Not fatal, but never silent: in login mode a key in the environment wins over the
+# stored login, so the session would bill the API while every message here said it
+# would not. It should be impossible -- remoteEnv reads a devcontainer-specific host
+# variable that up.sh only sets in api-key mode -- so if it happens, something is
+# setting ANTHROPIC_API_KEY inside the container and the user needs to know.
+if [ "$AUTH" = login ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    cat >&2 <<'MSG'
+
+!! claudeAuth=login, but ANTHROPIC_API_KEY is set in this container. Claude Code
+   prefers the key over the stored login, so this session would bill the API.
+   Find what exports it (a dotfile? a .env? containerEnv?) and remove it.
+
+MSG
+fi
+
+echo "claude-auth: ${AUTH}"

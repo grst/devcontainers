@@ -21,16 +21,22 @@ pass=0 fail=0
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
-# run_case <ok|refuse> <firewall|isolation> <description> [docker run flags...]
+# run_case <ok|refuse> <firewall|isolation|claude-auth> <description> [docker run flags...]
 #
 # "refuse" means the check must exit non-zero, which is what takes `devcontainer up`
 # down with it.
+#
+# claude-auth is invoked without sudo because postStartCommand invokes it without
+# sudo -- it reads one environment variable and is not in the NOPASSWD list, so
+# running it through sudo here would test a path that does not exist.
 run_case() {
     local expect="$1" check="$2" desc="$3" got
     shift 3
 
-    if "$ENGINE" run --rm "$@" "$IMAGE" \
-        sudo -E "/usr/local/bin/devcontainer-${check}" >"$log" 2>&1
+    local cmd=(sudo -E "/usr/local/bin/devcontainer-${check}")
+    [ "$check" = claude-auth ] && cmd=("/usr/local/bin/devcontainer-${check}")
+
+    if "$ENGINE" run --rm "$@" "$IMAGE" "${cmd[@]}" >"$log" 2>&1
     then got=ok; else got=refuse; fi
 
     if [ "$got" = "$expect" ]; then
@@ -48,6 +54,23 @@ echo '== the firewall gate must fail the container, not just complain =='
 run_case refuse firewall 'unset DEVCONTAINER_FIREWALL is refused'
 run_case refuse firewall 'firewall=on without NET_ADMIN is refused' \
     -e DEVCONTAINER_FIREWALL=on
+
+echo
+echo '== the auth gate must force the repo to say how claude authenticates =='
+run_case refuse claude-auth 'unset DEVCONTAINER_CLAUDE_AUTH is refused'
+run_case refuse claude-auth 'an empty DEVCONTAINER_CLAUDE_AUTH is refused' \
+    -e DEVCONTAINER_CLAUDE_AUTH=
+run_case refuse claude-auth 'a value that is neither is refused' \
+    -e DEVCONTAINER_CLAUDE_AUTH=oauth
+run_case ok     claude-auth 'login is accepted' \
+    -e DEVCONTAINER_CLAUDE_AUTH=login
+run_case ok     claude-auth 'api-key is accepted' \
+    -e DEVCONTAINER_CLAUDE_AUTH=api-key
+# A key that reached a login-mode container is a session that silently bills the API
+# rather than the subscription, but it is a warning and not a refusal: failing the
+# container leaves no way in to fix it.
+run_case ok     claude-auth 'login with a stray ANTHROPIC_API_KEY warns but starts' \
+    -e DEVCONTAINER_CLAUDE_AUTH=login -e ANTHROPIC_API_KEY=sk-ant-whatever
 
 echo
 echo '== the isolation check must notice the things it exists for =='
