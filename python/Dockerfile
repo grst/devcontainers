@@ -149,7 +149,7 @@ RUN set -eux; \
 #
 # Copilot CLI resolves a platform-specific package (copilot-linux-x64) as an
 # optional dependency, which is another reason this image is amd64 only.
-ARG CLAUDE_CODE_VERSION=2.1.261
+ARG CLAUDE_CODE_VERSION=2.1.281
 ARG COPILOT_CLI_VERSION=1.0.83
 RUN npm install -g --no-fund --no-audit \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
